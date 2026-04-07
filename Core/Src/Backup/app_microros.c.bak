@@ -61,6 +61,8 @@ bool app_microros_init(
     context->node = rcl_get_zero_initialized_node();
     context->publisher = rcl_get_zero_initialized_publisher();
 
+    /* The selected UART becomes a raw XRCE-DDS transport. Higher-level text
+     * logging must use a different channel, or disable micro-ROS first. */
     rmw_uros_set_custom_transport(
         true,
         (void *)uart,
@@ -123,5 +125,6 @@ bool app_microros_publish_twist(
     context->twist_msg.linear.x = linear_x;
     context->twist_msg.angular.z = angular_z;
 
+    /* Reuse the preallocated message to avoid per-cycle allocation churn. */
     return rcl_publish(&context->publisher, &context->twist_msg, NULL) == RCL_RET_OK;
 }

@@ -33,10 +33,13 @@ enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME}
-        Core/Inc/app_microros.h
         Core/Inc/app_robot.h
+        Core/Inc/app_motor_smoke.h
         Core/Inc/calc_input_data.h
-        Core/Src/app_microros.c
+        Core/Inc/mros_executor.h
+        Core/Inc/mros_publisher.h
+        Core/Inc/mros_subscriber.h
+        Core/Src/app_motor_smoke.c
         Core/Src/app_robot.c
         Core/Src/calc_input_data.c)
 
@@ -51,6 +54,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
+    Core/Src/mros_executor.c
+    Core/Src/mros_publisher.c
+    Core/Src/mros_subscriber.c
 )
 
 # Add include paths

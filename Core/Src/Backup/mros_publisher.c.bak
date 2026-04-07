@@ -1,0 +1,54 @@
+#include "mros_publisher.h"
+
+static const char *mros_publisher_resolve_name(const char *value, const char *fallback)
+{
+    return (value != NULL) ? value : fallback;
+}
+
+bool mros_publisher_init_twist(
+    mros_publisher_context_t *context,
+    mros_executor_context_t *executor,
+    const char *topic_name)
+{
+    if (context == NULL || executor == NULL || !executor->initialized) {
+        return false;
+    }
+
+    *context = (mros_publisher_context_t) {
+        .publisher = rcl_get_zero_initialized_publisher(),
+    };
+
+    if (rclc_publisher_init_default(
+            &context->publisher,
+            &executor->node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+            mros_publisher_resolve_name(topic_name, MROS_PUBLISHER_DEFAULT_TWIST_TOPIC)) != RCL_RET_OK) {
+        return false;
+    }
+
+    context->twist_msg.linear.x = 0.0;
+    context->twist_msg.linear.y = 0.0;
+    context->twist_msg.linear.z = 0.0;
+    context->twist_msg.angular.x = 0.0;
+    context->twist_msg.angular.y = 0.0;
+    context->twist_msg.angular.z = 0.0;
+    context->initialized = true;
+
+    return true;
+}
+
+bool mros_publisher_publish_twist(
+    mros_publisher_context_t *context,
+    float linear_x,
+    float angular_z)
+{
+    if (context == NULL || !context->initialized) {
+        return false;
+    }
+
+    context->twist_msg.linear.x = linear_x;
+    context->twist_msg.angular.z = angular_z;
+
+    /* Reuse the preallocated message to avoid per-cycle allocation churn. */
+    return rcl_publish(&context->publisher, &context->twist_msg, NULL) == RCL_RET_OK;
+}

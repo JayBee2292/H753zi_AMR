@@ -4,18 +4,19 @@
 
 #include "calc_input_data.h"
 
-// 로봇 상태 글로벌 변수에 접근하기 위해 임시 포인터 선언 (또는 메인 로봇 객체를 가리키도록 설정 필요)
-extern robot_status_t robot_state; 
+void encoder_overflow_callback(robot_status_t *robot, TIM_HandleTypeDef *htim) {
+    if (robot == NULL || htim == NULL) {
+        return;
+    }
 
-void encoder_overflow_callback(TIM_HandleTypeDef *htim) {
     // 4개의 바퀴 중 현재 인터럽트가 발생한 타이머를 찾습니다.
     for (int i = 0; i < WHEEL_COUNT; i++) {
-        if (robot_state.wheels[i].htim == htim) {
+        if (robot->wheels[i].htim == htim) {
             // 방향 확인: DIR 비트가 1이면 DOWN 카운팅 (언더플로우), 0이면 UP 카운팅 (오버플로우)
             if (__HAL_TIM_IS_TIM_COUNTING_DOWN(htim)) {
-                robot_state.wheels[i].overflow_cnt--;
+                robot->wheels[i].overflow_cnt--;
             } else {
-                robot_state.wheels[i].overflow_cnt++;
+                robot->wheels[i].overflow_cnt++;
             }
             break;
         }
@@ -50,11 +51,15 @@ int64_t get_total_encoder_tick(wheel_state_t *wheel) {
     __set_PRIMASK(primask_bit);             // 인터럽트 상태 원래대로 복구 (Critical Section 끝)
 
     // 총 틱 수 계산
-    int64_t total_ticks = ((int64_t)current_overflow * (int64_t)(arr + 1)) + current_cnt;
+    int64_t total_ticks = ((int64_t)current_overflow * ((int64_t)arr + 1LL)) + (int64_t) current_cnt;
     return total_ticks;
 }
 
 void wheel_update_velocity(wheel_state_t *wheel, float dt) {
+    if (wheel == NULL) {
+        return;
+    }
+
     if (dt <= 0.0f) {
         wheel->velocity_mps = 0.0f;
         return;
@@ -85,6 +90,10 @@ void wheel_update_velocity(wheel_state_t *wheel, float dt) {
 }
 
 void calculate_robot_kinematics(robot_status_t *robot) {
+    if (robot == NULL) {
+        return;
+    }
+
     // 4륜 스키드 스티어(Skid-steer) 또는 차동 구동(Differential drive) 로봇 가정
     // 인덱스 매핑 가정 (사용 환경에 맞게 수정 가능):
     // 0: Front Left (FL)
@@ -115,15 +124,17 @@ void calculate_robot_kinematics(robot_status_t *robot) {
 #include <stdio.h>
 #include <string.h>
 
-void debug_print_robot_state(UART_HandleTypeDef *huart) {
-    if (huart == NULL) return;
+void debug_print_robot_state(const robot_status_t *robot, UART_HandleTypeDef *huart) {
+    if (robot == NULL || huart == NULL) {
+        return;
+    }
     
     char buf[128];
     // 선속도(V), 각속도(W), 그리고 1번 바퀴(Front Left)의 누적 이동 거리를 출력합니다.
     snprintf(buf, sizeof(buf), "V: %.3f m/s, W: %.3f rad/s, Dist(FL): %.3f m\r\n",
-             robot_state.robot_linear_v, 
-             robot_state.robot_angular_w, 
-             robot_state.wheels[0].total_distance_m);
+             robot->robot_linear_v,
+             robot->robot_angular_w,
+             robot->wheels[0].total_distance_m);
              
     HAL_UART_Transmit(huart, (uint8_t*)buf, strlen(buf), 10);
 }

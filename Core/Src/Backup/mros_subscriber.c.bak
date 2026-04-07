@@ -1,0 +1,75 @@
+#include "mros_subscriber.h"
+
+static const char *mros_subscriber_resolve_name(const char *value, const char *fallback)
+{
+    return (value != NULL) ? value : fallback;
+}
+
+static void mros_subscriber_twist_bridge(const void *msg, void *context)
+{
+    mros_subscriber_context_t *subscriber = (mros_subscriber_context_t *)context;
+
+    if (subscriber == NULL || subscriber->callback == NULL || msg == NULL) {
+        return;
+    }
+
+    subscriber->callback(
+        (const geometry_msgs__msg__Twist *)msg,
+        subscriber->callback_context);
+}
+
+bool mros_subscriber_init_twist(
+    mros_subscriber_context_t *context,
+    mros_executor_context_t *executor,
+    const char *topic_name)
+{
+    if (context == NULL || executor == NULL || !executor->initialized) {
+        return false;
+    }
+
+    *context = (mros_subscriber_context_t) {
+        .subscription = rcl_get_zero_initialized_subscription(),
+    };
+
+    if (rclc_subscription_init_default(
+            &context->subscription,
+            &executor->node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(geometry_msgs, msg, Twist),
+            mros_subscriber_resolve_name(topic_name, MROS_SUBSCRIBER_DEFAULT_TWIST_TOPIC)) != RCL_RET_OK) {
+        return false;
+    }
+
+    context->initialized = true;
+    return true;
+}
+
+bool mros_subscriber_attach_twist(
+    mros_subscriber_context_t *context,
+    mros_executor_context_t *executor,
+    mros_subscriber_twist_callback_t callback,
+    void *callback_context)
+{
+    if (context == NULL ||
+        executor == NULL ||
+        callback == NULL ||
+        !context->initialized ||
+        !executor->executor_initialized) {
+        return false;
+    }
+
+    context->callback = callback;
+    context->callback_context = callback_context;
+
+    if (rclc_executor_add_subscription_with_context(
+            &executor->executor,
+            &context->subscription,
+            &context->twist_msg,
+            mros_subscriber_twist_bridge,
+            context,
+            ON_NEW_DATA) != RCL_RET_OK) {
+        return false;
+    }
+
+    context->attached = true;
+    return true;
+}

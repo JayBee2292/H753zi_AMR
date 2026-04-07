@@ -1,0 +1,35 @@
+#ifndef MROS_SUBSCRIBER_H
+#define MROS_SUBSCRIBER_H
+
+#include <stdbool.h>
+
+#include "mros_executor.h"
+
+#include <geometry_msgs/msg/twist.h>
+
+#define MROS_SUBSCRIBER_DEFAULT_TWIST_TOPIC "cmd_vel"
+
+typedef void (*mros_subscriber_twist_callback_t)(
+    const geometry_msgs__msg__Twist *msg,
+    void *context);
+
+typedef struct {
+    rcl_subscription_t subscription;
+    geometry_msgs__msg__Twist twist_msg;
+    mros_subscriber_twist_callback_t callback;
+    void *callback_context;
+    bool initialized;
+    bool attached;
+} mros_subscriber_context_t;
+
+bool mros_subscriber_init_twist(
+    mros_subscriber_context_t *context,
+    mros_executor_context_t *executor,
+    const char *topic_name);
+bool mros_subscriber_attach_twist(
+    mros_subscriber_context_t *context,
+    mros_executor_context_t *executor,
+    mros_subscriber_twist_callback_t callback,
+    void *callback_context);
+
+#endif

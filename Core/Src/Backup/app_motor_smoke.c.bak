@@ -1,0 +1,299 @@
+#include "app_motor_smoke.h"
+
+#include "cmsis_os2.h"
+#include "main.h"
+#include "tim.h"
+#include "usart.h"
+
+#include <stdio.h>
+#include <string.h>
+
+enum {
+    APP_MOTOR_SMOKE_UPDATE_MS = 20U,
+    APP_MOTOR_SMOKE_PRINT_MS = 200U,
+};
+
+/* Keep the all-wheel smoke test conservative to avoid tripping the power board. */
+static const int32_t APP_MOTOR_SMOKE_DUTY_PERCENT = 50;
+
+typedef struct {
+    robot_status_t *robot;
+    UART_HandleTypeDef *debug_uart;
+    int32_t front_left_raw_delta;
+    int32_t front_right_raw_delta;
+    int32_t rear_left_raw_delta;
+    int32_t rear_right_raw_delta;
+    uint32_t front_left_prev_cnt;
+    uint32_t front_right_prev_cnt;
+    uint32_t rear_left_prev_cnt;
+    uint32_t rear_right_prev_cnt;
+    uint32_t last_update_ms;
+    uint32_t last_print_ms;
+    bool is_initialized;
+} app_motor_smoke_state_t;
+
+static app_motor_smoke_state_t g_app_motor_smoke = {0};
+
+static void app_motor_smoke_format_i64(int64_t value, char *buffer, size_t buffer_size)
+{
+    char digits[24];
+    size_t digit_count = 0U;
+    uint64_t magnitude;
+    size_t index = 0U;
+
+    if (buffer == NULL || buffer_size == 0U) {
+        return;
+    }
+
+    if (value < 0) {
+        magnitude = (uint64_t) (-(value + 1)) + 1ULL;
+    } else {
+        magnitude = (uint64_t) value;
+    }
+
+    do {
+        digits[digit_count++] = (char) ('0' + (magnitude % 10ULL));
+        magnitude /= 10ULL;
+    } while (magnitude != 0ULL && digit_count < sizeof(digits));
+
+    if (value < 0 && index < (buffer_size - 1U)) {
+        buffer[index++] = '-';
+    }
+
+    while (digit_count > 0U && index < (buffer_size - 1U)) {
+        buffer[index++] = digits[--digit_count];
+    }
+
+    buffer[index] = '\0';
+}
+
+static uint32_t app_motor_smoke_percent_to_compare(int32_t duty_percent)
+{
+    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim1);
+    uint32_t magnitude = (duty_percent < 0) ? (uint32_t) (-duty_percent) : (uint32_t) duty_percent;
+
+    if (magnitude > 100U) {
+        magnitude = 100U;
+    }
+
+    return (arr * magnitude) / 100U;
+}
+
+static int32_t app_motor_smoke_compute_raw_delta(
+    TIM_HandleTypeDef *htim,
+    uint32_t previous_cnt,
+    uint32_t current_cnt)
+{
+    uint64_t period;
+    int64_t delta;
+
+    if (htim == NULL) {
+        return 0;
+    }
+
+    period = (uint64_t) __HAL_TIM_GET_AUTORELOAD(htim) + 1ULL;
+    delta = (int64_t) current_cnt - (int64_t) previous_cnt;
+
+    /* Raw CNT wraps on 16-bit timers, so fold the delta back into the shortest
+     * signed step as long as the wheel cannot move more than half a turn-range
+     * between two debug samples. */
+    if (period > 0ULL) {
+        int64_t half_period = (int64_t) (period / 2ULL);
+
+        if (delta > half_period) {
+            delta -= (int64_t) period;
+        } else if (delta < -half_period) {
+            delta += (int64_t) period;
+        }
+    }
+
+    return (int32_t) delta;
+}
+
+static void app_motor_smoke_apply_all_direction(bool is_forward)
+{
+    /* Measured rear pair polarity is mirrored by side, so apply the same left/right
+     * convention to the front pair during the all-wheel smoke test. */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, is_forward ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_8, is_forward ? GPIO_PIN_RESET : GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, is_forward ? GPIO_PIN_SET : GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, is_forward ? GPIO_PIN_RESET : GPIO_PIN_SET);
+}
+
+static void app_motor_smoke_apply_all_output(int32_t duty_percent)
+{
+    uint32_t compare = app_motor_smoke_percent_to_compare(duty_percent);
+
+    if (duty_percent > 0) {
+        app_motor_smoke_apply_all_direction(true);
+    } else if (duty_percent < 0) {
+        app_motor_smoke_apply_all_direction(false);
+    }
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, compare);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, compare);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, compare);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, compare);
+}
+
+static void app_motor_smoke_print_status(void)
+{
+    char line[384];
+    char fl_total_tick[24];
+    char fr_total_tick[24];
+    char rl_total_tick[24];
+    char rr_total_tick[24];
+    robot_status_t *robot = g_app_motor_smoke.robot;
+    uint32_t fl_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[0].htim);
+    uint32_t fr_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[1].htim);
+    uint32_t rl_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[2].htim);
+    uint32_t rr_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[3].htim);
+    long fl_mmps = (long) (robot->wheels[0].velocity_mps * 1000.0f);
+    long fr_mmps = (long) (robot->wheels[1].velocity_mps * 1000.0f);
+    long rl_mmps = (long) (robot->wheels[2].velocity_mps * 1000.0f);
+    long rr_mmps = (long) (robot->wheels[3].velocity_mps * 1000.0f);
+    long v_mmps = (long) (robot->robot_linear_v * 1000.0f);
+    long w_mrad = (long) (robot->robot_angular_w * 1000.0f);
+
+    app_motor_smoke_format_i64(robot->wheels[0].total_tick, fl_total_tick, sizeof(fl_total_tick));
+    app_motor_smoke_format_i64(robot->wheels[1].total_tick, fr_total_tick, sizeof(fr_total_tick));
+    app_motor_smoke_format_i64(robot->wheels[2].total_tick, rl_total_tick, sizeof(rl_total_tick));
+    app_motor_smoke_format_i64(robot->wheels[3].total_tick, rr_total_tick, sizeof(rr_total_tick));
+
+    int length = snprintf(
+        line,
+        sizeof(line),
+        "FL c=%lu t=%s d=%ld i=%u v=%ld | FR c=%lu t=%s d=%ld i=%u v=%ld | RL c=%lu t=%s d=%ld i=%u v=%ld | RR c=%lu t=%s d=%ld i=%u v=%ld | V=%ld W=%ld\r\n",
+        (unsigned long) fl_cnt,
+        fl_total_tick,
+        (long) g_app_motor_smoke.front_left_raw_delta,
+        robot->wheels[0].is_inverted_direction ? 1U : 0U,
+        fl_mmps,
+        (unsigned long) fr_cnt,
+        fr_total_tick,
+        (long) g_app_motor_smoke.front_right_raw_delta,
+        robot->wheels[1].is_inverted_direction ? 1U : 0U,
+        fr_mmps,
+        (unsigned long) rl_cnt,
+        rl_total_tick,
+        (long) g_app_motor_smoke.rear_left_raw_delta,
+        robot->wheels[2].is_inverted_direction ? 1U : 0U,
+        rl_mmps,
+        (unsigned long) rr_cnt,
+        rr_total_tick,
+        (long) g_app_motor_smoke.rear_right_raw_delta,
+        robot->wheels[3].is_inverted_direction ? 1U : 0U,
+        rr_mmps,
+        v_mmps,
+        w_mrad);
+
+    if (length > 0) {
+        HAL_UART_Transmit(
+            g_app_motor_smoke.debug_uart,
+            (uint8_t *) line,
+            (uint16_t) length,
+            HAL_MAX_DELAY);
+    }
+}
+
+bool app_motor_smoke_init(robot_status_t *robot, UART_HandleTypeDef *debug_uart)
+{
+    if (robot == NULL || debug_uart == NULL) {
+        return false;
+    }
+
+    memset(&g_app_motor_smoke, 0, sizeof(g_app_motor_smoke));
+    g_app_motor_smoke.robot = robot;
+    g_app_motor_smoke.debug_uart = debug_uart;
+
+    app_robot_reset_measurements(robot);
+
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0U);
+    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 0U);
+    app_motor_smoke_apply_all_direction(true);
+
+    /* Track raw encoder deltas independently from cumulative total_tick debug data. */
+    g_app_motor_smoke.front_left_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[0].htim);
+    g_app_motor_smoke.front_right_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[1].htim);
+    g_app_motor_smoke.rear_left_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[2].htim);
+    g_app_motor_smoke.rear_right_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[3].htim);
+
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) {
+        return false;
+    }
+
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK) {
+        return false;
+    }
+
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3) != HAL_OK) {
+        return false;
+    }
+
+    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+        return false;
+    }
+
+    /* Run all four wheels in the same vehicle-forward direction so wiring,
+     * DIR polarity, and encoder sign can be checked together. */
+    app_motor_smoke_apply_all_output(APP_MOTOR_SMOKE_DUTY_PERCENT);
+
+    g_app_motor_smoke.last_update_ms = osKernelGetTickCount();
+    g_app_motor_smoke.last_print_ms = g_app_motor_smoke.last_update_ms;
+    g_app_motor_smoke.is_initialized = true;
+    return true;
+}
+
+void app_motor_smoke_process(uint32_t now_ms)
+{
+    robot_status_t *robot = g_app_motor_smoke.robot;
+    float dt;
+    uint32_t rl_now;
+    uint32_t rr_now;
+    uint32_t fl_now;
+    uint32_t fr_now;
+
+    if (!g_app_motor_smoke.is_initialized || robot == NULL) {
+        return;
+    }
+
+    dt = (float) (now_ms - g_app_motor_smoke.last_update_ms) / 1000.0f;
+    if (dt <= 0.0f) {
+        return;
+    }
+
+    g_app_motor_smoke.last_update_ms = now_ms;
+
+    fl_now = __HAL_TIM_GET_COUNTER(robot->wheels[0].htim);
+    fr_now = __HAL_TIM_GET_COUNTER(robot->wheels[1].htim);
+    rl_now = __HAL_TIM_GET_COUNTER(robot->wheels[2].htim);
+    rr_now = __HAL_TIM_GET_COUNTER(robot->wheels[3].htim);
+
+    g_app_motor_smoke.front_left_raw_delta =
+        app_motor_smoke_compute_raw_delta(robot->wheels[0].htim, g_app_motor_smoke.front_left_prev_cnt, fl_now);
+    g_app_motor_smoke.front_right_raw_delta =
+        app_motor_smoke_compute_raw_delta(robot->wheels[1].htim, g_app_motor_smoke.front_right_prev_cnt, fr_now);
+    g_app_motor_smoke.rear_left_raw_delta =
+        app_motor_smoke_compute_raw_delta(robot->wheels[2].htim, g_app_motor_smoke.rear_left_prev_cnt, rl_now);
+    g_app_motor_smoke.rear_right_raw_delta =
+        app_motor_smoke_compute_raw_delta(robot->wheels[3].htim, g_app_motor_smoke.rear_right_prev_cnt, rr_now);
+
+    g_app_motor_smoke.front_left_prev_cnt = fl_now;
+    g_app_motor_smoke.front_right_prev_cnt = fr_now;
+    g_app_motor_smoke.rear_left_prev_cnt = rl_now;
+    g_app_motor_smoke.rear_right_prev_cnt = rr_now;
+
+    app_robot_update(robot, dt);
+
+    if ((now_ms - g_app_motor_smoke.last_print_ms) >= APP_MOTOR_SMOKE_PRINT_MS) {
+        g_app_motor_smoke.last_print_ms = now_ms;
+        app_motor_smoke_print_status();
+    }
+}
+
+uint32_t app_motor_smoke_get_period_ms(void)
+{
+    return APP_MOTOR_SMOKE_UPDATE_MS;
+}

@@ -1,0 +1,36 @@
+#ifndef MROS_EXECUTOR_H
+#define MROS_EXECUTOR_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "usart.h"
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+
+#define MROS_EXECUTOR_DEFAULT_NODE_NAME "cubemx_node"
+
+typedef struct {
+    rcl_allocator_t allocator;
+    rclc_support_t support;
+    rcl_node_t node;
+    rclc_executor_t executor;
+    bool initialized;
+    bool executor_initialized;
+} mros_executor_context_t;
+
+bool mros_executor_init(
+    mros_executor_context_t *context,
+    UART_HandleTypeDef *uart,
+    const char *node_name);
+bool mros_executor_prepare(
+    mros_executor_context_t *context,
+    size_t handle_count);
+bool mros_executor_spin_some(
+    mros_executor_context_t *context,
+    uint64_t timeout_ns);
+
+#endif

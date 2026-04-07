@@ -38,6 +38,9 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+/* Keep UART4 as an optional fallback debug port, but do not initialize it
+ * unless we intentionally split transport and human-readable logs. */
+#define APP_ENABLE_UART4_DEBUG 0
 
 /* USER CODE END PD */
 
@@ -95,6 +98,15 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
+  /* Catch bus/memory/usage faults individually instead of escalating everything to HardFault. */
+  SCB->SHCSR |= SCB_SHCSR_MEMFAULTENA_Msk;
+  SCB->SHCSR |= SCB_SHCSR_BUSFAULTENA_Msk;
+  SCB->SHCSR |= SCB_SHCSR_USGFAULTENA_Msk;
+  /* Keep divide-by-zero trapping enabled.
+   * Unaligned trap is intentionally left off: during micro-ROS bring-up it converted
+   * middleware/serialization accesses into UsageFault(UNALIGNED), while Cortex-M7 can
+   * handle those accesses in hardware. Re-enable it only after auditing the full stack. */
+  SCB->CCR |= SCB_CCR_DIV_0_TRP_Msk;
 
   /* USER CODE END Init */
 
@@ -115,13 +127,16 @@ int main(void)
   MX_TIM4_Init();
   MX_TIM5_Init();
   MX_USART3_UART_Init();
-  MX_UART4_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
+  /* Bind the four encoder timers once at boot so the rest of the application
+   * can stay independent from the Cube-generated timer globals. */
   app_robot_timer_map_t timer_map = {
       .front_left = &htim3,
       .front_right = &htim4,
       .rear_left = &htim2,
-      .rear_right = &htim5,
+      /* Temporary debug path: move RR encoder off TIM5 onto TIM8 (PC6/PC7). */
+      .rear_right = &htim8,
   };
 
   if (!app_robot_init(&timer_map)) {
@@ -143,10 +158,10 @@ int main(void)
 
   /* USER CODE BEGIN BSP */
 
-  /* -- Sample board code to switch on leds ---- */
-  BSP_LED_On(LED_GREEN);
-  BSP_LED_On(LED_YELLOW);
-  BSP_LED_On(LED_RED);
+  /* Leave all LEDs off here so runtime status indication from FreeRTOS tasks is readable. */
+  BSP_LED_Off(LED_GREEN);
+  BSP_LED_Off(LED_YELLOW);
+  BSP_LED_Off(LED_RED);
 
   /* USER CODE END BSP */
 
@@ -288,8 +303,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
-  // 엔코더 타이머 오버플로우/언더플로우 발생 시 처리 (16비트 -> 32/64비트 확장)
-  if (htim->Instance == TIM2 || htim->Instance == TIM3 || htim->Instance == TIM4 || htim->Instance == TIM5) {
+  // 엔코더 타이머 update interrupt를 소프트웨어 overflow 카운터에 반영해 64비트 절대 틱을 유지합니다.
+  if (htim->Instance == TIM2 || htim->Instance == TIM3 || htim->Instance == TIM4 ||
+      htim->Instance == TIM5 || htim->Instance == TIM8) {
       app_robot_handle_encoder_overflow(htim);
   }
   /* USER CODE END Callback 1 */

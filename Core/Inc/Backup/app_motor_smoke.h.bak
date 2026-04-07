@@ -1,0 +1,13 @@
+#ifndef APP_MOTOR_SMOKE_H
+#define APP_MOTOR_SMOKE_H
+
+#include "app_robot.h"
+
+#include <stdbool.h>
+#include <stdint.h>
+
+bool app_motor_smoke_init(robot_status_t *robot, UART_HandleTypeDef *debug_uart);
+void app_motor_smoke_process(uint32_t now_ms);
+uint32_t app_motor_smoke_get_period_ms(void);
+
+#endif /* APP_MOTOR_SMOKE_H */

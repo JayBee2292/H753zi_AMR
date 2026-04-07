@@ -53,7 +53,7 @@ typedef struct {
 /**
  * @brief 16비트 타이머의 오버플로우/언더플로우 인터럽트 발생 시 호출 (main.c에서 연동)
  */
-void encoder_overflow_callback(TIM_HandleTypeDef *htim);
+void encoder_overflow_callback(robot_status_t *robot, TIM_HandleTypeDef *htim);
 
 /**
  * @brief 현재 타이머 카운트와 오버플로우를 취합해 32/64비트 총 누적 틱 반환
@@ -77,6 +77,6 @@ void calculate_robot_kinematics(robot_status_t *robot);
  * @brief 계산된 로봇의 속도, 각속도, 거리를 UART로 전송하여 디버깅합니다.
  * @param huart 전송에 사용할 UART 핸들 포인터
  */
-void debug_print_robot_state(UART_HandleTypeDef *huart);
+void debug_print_robot_state(const robot_status_t *robot, UART_HandleTypeDef *huart);
 
 #endif // CALC_INPUT_DATA_H
