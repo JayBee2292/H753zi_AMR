@@ -1,0 +1,1 @@
+CFLAGS = -mcpu=cortex-m7 -mthumb -mfloat-abi=hard -mfpu=fpv5-d16 -O3 -DSTM32H753xx
