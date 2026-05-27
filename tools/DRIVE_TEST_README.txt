@@ -16,7 +16,9 @@ Purpose:
 - Left stick Y and right stick X can be used at the same time.
 - Stick input is converted to body velocity v,w first.
 - v,w is sent directly to STM with the UART CMD_TWIST packet.
-- STM runs differential/skid-steer inverse kinematics and PID speed control.
+- STM runs differential/skid-steer inverse kinematics.
+- PID speed control is implemented, but the currently tested firmware build is
+  configured for OPENLOOP operation with APP_UART_SMOKE_USE_PID=0.
 - Left stick X is ignored so forward/backward driving is stable.
 
 Default tracked-wheel geometry:

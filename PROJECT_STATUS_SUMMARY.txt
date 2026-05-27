@@ -1,6 +1,11 @@
 H753 ROS2 SLAM project status summary
 Date: 2026-05-12
 
+NOTICE (2026-05-27):
+- The current authoritative handoff is JETSON_CODEX_HANDOFF.md.
+- PID code exists, but the currently tested firmware has APP_UART_SMOKE_USE_PID=0 (OPENLOOP).
+- The corrected driven-wheel encoder PPR is 548776, not the earlier calibration value.
+
 1. Current architecture
 
 Xbox controller

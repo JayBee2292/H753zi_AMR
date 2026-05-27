@@ -4,6 +4,11 @@ Current date of saved context: 2026-05-21
 Repo: /home/jongbeom/h753_ros_humble
 ROS2 workspace: /home/jongbeom/ros2_ws
 
+UPDATE (2026-05-27):
+- Read JETSON_CODEX_HANDOFF.md first; it supersedes outdated runtime/calibration details below.
+- Current tested firmware uses OPENLOOP (`APP_UART_SMOKE_USE_PID=0`).
+- Current driven-wheel PPR is `548776`, validated against a 3 m / 6.05 s straight run.
+
 Architecture:
 - Xbox remote driving is over UART to STM32.
 - STM32 telemetry is sent over CAN FD to PC through Makerbase CANable V2.0 Pro.

@@ -2,6 +2,10 @@
 
 Use this file as the starting prompt when continuing the project later.
 
+> Update on 2026-05-27: read `JETSON_CODEX_HANDOFF.md` first for the current
+> open-loop runtime state, corrected encoder PPR (`548776`), and Jetson
+> migration steps.
+
 ## Current robot communication architecture
 
 - Board project: STM32H753 firmware in `h753_ros_humble`.
