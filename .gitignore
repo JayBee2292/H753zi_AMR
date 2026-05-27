@@ -1,0 +1,9 @@
+tools/venv/
+tools/.venv/
+tools/logs/
+build/
+/venv
+__pycache__/
+*.pyc
+*.su
+.idea/pySourceRootDetection.xml

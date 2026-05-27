@@ -214,13 +214,13 @@ extern DMA_HandleTypeDef hdma_tim1_up;
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
-extern TIM_HandleTypeDef htim5;
 extern TIM_HandleTypeDef htim8;
 extern DMA_HandleTypeDef hdma_usart3_rx;
 extern DMA_HandleTypeDef hdma_usart3_tx;
 extern UART_HandleTypeDef huart3;
 extern TIM_HandleTypeDef htim6;
 
+extern FDCAN_HandleTypeDef hfdcan1;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -461,20 +461,6 @@ void TIM8_UP_TIM13_IRQHandler(void)
 }
 
 /**
-  * @brief This function handles TIM5 global interrupt.
-  */
-void TIM5_IRQHandler(void)
-{
-  /* USER CODE BEGIN TIM5_IRQn 0 */
-
-  /* USER CODE END TIM5_IRQn 0 */
-  HAL_TIM_IRQHandler(&htim5);
-  /* USER CODE BEGIN TIM5_IRQn 1 */
-
-  /* USER CODE END TIM5_IRQn 1 */
-}
-
-/**
   * @brief This function handles TIM6 global interrupt, DAC1_CH1 and DAC1_CH2 underrun error interrupts.
   */
 void TIM6_DAC_IRQHandler(void)
@@ -489,5 +475,13 @@ void TIM6_DAC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+/**
+  * @brief This function handles FDCAN1 interrupt 0 (RxFifo0 new message).
+  */
+void FDCAN1_IT0_IRQHandler(void)
+{
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+}
 
 /* USER CODE END 1 */

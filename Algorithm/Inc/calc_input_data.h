@@ -10,6 +10,7 @@
 #include <stdbool.h>
 #include <math.h>
 #include "arm_math.h"
+#include "kalman_filter.h"
 
 #define WHEEL_COUNT         4U     /* 로봇 바퀴 개수. 현재 코드는 FL/FR/RL/RR 4륜을 가정합니다. */
 #define ROBOT_WIDTH_M       0.45f  /* 물리적인 좌우 바퀴 중심 간 거리(미터). 실측치 보관용 상수입니다. */
@@ -19,21 +20,27 @@
 /**
  * @brief 단일 바퀴의 엔코더/속도/거리 상태
  * @details
- * - 하드웨어 타이머 카운트와 소프트웨어 누적 오버플로우 값을 합쳐 절대 엔코더 틱을 추적합니다.
+ * - 하드웨어 타이머의 raw CNT delta를 주기마다 누적해 64비트 절대 엔코더 틱을 추적합니다.
  * - 속도는 주기별 delta tick으로 계산하고, 누적 거리는 절대 tick을 직접 거리로 환산해 드리프트를 줄입니다.
  */
 typedef struct {
     /* 하드웨어 상수 */
-    uint32_t ppr;             /* 엔코더 1회전당 펄스 수(Pulses Per Revolution) */
+    uint32_t ppr;             /* 구동 바퀴 1회전당 엔코더 누적 count */
     float    diameter_m;      /* 바퀴 지름(미터). 둘레 계산에 사용됩니다. */
-    
+
     /* 동적 상태 */
-    int64_t  total_tick;      /* 현재 시점의 절대 엔코더 틱. 하드웨어 카운터 방향 기준의 raw 값입니다. */
-    int64_t  prev_tick;       /* 직전 샘플의 절대 엔코더 틱. delta tick 계산 기준점입니다. */
-    int32_t  overflow_cnt;    /* 타이머 업데이트 인터럽트로 누적한 overflow/underflow 회수 */
-    float    velocity_mps;    /* 현재 바퀴 선속도(m/s) */
+    int64_t  total_tick;      /* raw CNT delta를 누적한 64비트 엔코더 tick입니다. */
+    int64_t  prev_tick;       /* 직전 샘플의 64비트 엔코더 tick입니다. */
+    uint32_t last_counter;    /* 직전 샘플의 하드웨어 CNT raw 값입니다. */
+    uint32_t delta_tick_abs;  /* 직전 샘플 대비 부호 보정된 엔코더 delta 절대값 */
+    uint32_t fault_count;     /* 물리 한계를 넘는 delta를 감지한 누적 횟수 */
+    volatile int32_t overflow_cnt; /* 이전 overflow 방식과의 호환용 필드입니다. 런타임 계산에는 쓰지 않습니다. */
+    float    raw_velocity_mps;/* 필터 적용 전 엔코더 기반 바퀴 선속도(m/s) */
+    float    velocity_mps;    /* 칼만필터 적용 후 현재 바퀴 선속도(m/s) */
     double   total_distance_m;/* 부호 보정된 절대 tick을 거리로 직접 환산한 누적 이동 거리(m) */
+    kalman_filter_t velocity_filter; /* 엔코더 속도 측정값 필터 */
     bool     is_inverted_direction; /* 차량 전진을 양수로 맞추기 위한 부호 반전 여부 */
+    bool     has_counter_sample; /* last_counter 기준점이 설정되었는지 여부 */
     bool     is_fault;        /* 향후 엔코더/구동 이상 진단에 사용할 오류 플래그 */
     TIM_HandleTypeDef* htim;  /* 이 바퀴에 연결된 엔코더 타이머 핸들 */
 } wheel_state_t;
@@ -46,11 +53,11 @@ typedef struct {
  */
 typedef struct {
     wheel_state_t wheels[WHEEL_COUNT]; /* 바퀴 인덱스 순서: FL, FR, RL, RR */
-    
+
     /* 로봇 통합 상태 */
     float robot_linear_v;     /* 로봇 차체 중심의 전진 선속도(v, m/s) */
     float robot_angular_w;    /* 로봇 차체 중심의 요(yaw) 회전 각속도(w, rad/s) */
-    
+
     /* IMU (Jetson 등 외부에서 수신된 데이터) */
     struct {
         float acc_x;              /* x축 선형 가속도(m/s^2) */
@@ -69,7 +76,7 @@ typedef struct {
 void encoder_overflow_callback(robot_status_t *robot, TIM_HandleTypeDef *htim);
 
 /**
- * @brief 현재 타이머 카운트와 overflow 누적값을 합쳐 64비트 절대 엔코더 틱을 반환합니다.
+ * @brief 마지막 갱신 시점까지 누적된 64비트 절대 엔코더 틱을 반환합니다.
  */
 int64_t get_total_encoder_tick(wheel_state_t *wheel);
 

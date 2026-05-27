@@ -25,10 +25,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "app_motor_smoke.h"
+#include "app_uart_smoke.h"
 #include "app_robot.h"
-#include "mros_executor.h"
-#include "mros_publisher.h"
+#include "can_telemetry.h"
 #include "usart.h"
 /* USER CODE END Includes */
 
@@ -39,13 +38,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-/* 1 enables the all-wheel smoke/debug mode that drives motors and prints status over UART3. */
-#define UART3_SMOKE_TEST 1
-/* micro-ROS init/publish path is significantly deeper than the smoke loop.
- * Keep 16 KiB here because smaller stacks caused INVPC-like fault symptoms during bring-up. */
+/* UART remote control + CAN FD telemetry runtime. */
 #define DEFAULT_TASK_STACK_SIZE_BYTES (4096U * sizeof(StackType_t))
-/* Toggle green once every N successful publishes so the heartbeat is visible to the eye. */
-#define MROS_PUBLISH_LED_DIVIDER 10U
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -59,7 +53,6 @@
 /* USER CODE END Variables */
 /* Definitions for defaultTask */
 osThreadId_t defaultTaskHandle;
-/* Default task owns the top-level mode loop: all-wheel smoke/debug or micro-ROS publish. */
 const osThreadAttr_t defaultTask_attributes = {
   .name = "defaultTask",
   .stack_size = DEFAULT_TASK_STACK_SIZE_BYTES,
@@ -104,31 +97,7 @@ static void freertos_set_leds(bool green_on, bool yellow_on, bool red_on)
    }
 }
 
-static void freertos_show_microros_waiting(void)
-{
-   /* Normal micro-ROS path uses green only.
-    * Yellow/red are reserved for actual fault indication after the bring-up debug phase. */
-   freertos_set_leds(true, false, false);
-}
-
-static void freertos_show_microros_publish_ok(bool toggle_heartbeat)
-{
-   if (toggle_heartbeat) {
-      BSP_LED_Toggle(LED_GREEN);
-   } else {
-      BSP_LED_On(LED_GREEN);
-   }
-
-   /* Green only: at least one publish succeeded and the loop is alive. */
-   BSP_LED_Off(LED_YELLOW);
-   BSP_LED_Off(LED_RED);
-}
-
-static void freertos_show_microros_fault(void)
-{
-   /* Red steady: initialization or publish failed and the task is about to stop. */
-   freertos_set_leds(false, false, true);
-}
+/* Unused micro-ROS LEDs functions removed */
 
 static void freertos_stack_fault_loop(void)
 {
@@ -210,19 +179,11 @@ void MX_FREERTOS_Init(void) {
 
 /* USER CODE BEGIN Header_StartDefaultTask */
 /**
-  * @brief  메인 제어 루프(Default Task)
+ * @brief  메인 제어 루프(Default Task)
  * @details
- * [알고리즘 설명]
-  * - UART3_SMOKE_TEST:
-  *   1. 4륜 전체를 같은 차량 진행 방향 기준으로 개루프(Open-loop) 구동합니다.
-  *   2. 엔코더 raw delta, 절대 tick, 선속도, 각속도를 UART3로 출력합니다.
-  *   3. 모터/엔코더/방향 핀/부호 설정이 올바른지 빠르게 점검하는 smoke/debug 모드입니다.
-  * - 일반 모드(micro-ROS 모드):
-  *   1. micro-ROS Executor와 Publisher를 초기화하여 ROS2 통신 환경을 구성합니다.
-  *   2. 25ms 절대 주기로 제어 루프를 실행하며, 실제 경과 tick으로 dt를 계산합니다.
-  *   3. `app_robot_update()`를 호출하여 엔코더 값 기반 현재 선속도 및 각속도(Kinematics)를 계산합니다.
-  *   4. 계산된 로봇의 Twist(V, W) 상태를 micro-ROS(DDS)를 통해 상위 제어기(Host)로 퍼블리시(Publish)합니다.
-  *   5. 정상 상태 LED는 초록 heartbeat만 사용하고, 노랑/빨강은 fault 전용으로 남깁니다.
+ * - UART3에서 Xbox/키보드 원격 주행 패킷을 수신해 좌/우 모터 duty를 갱신합니다.
+ * - 같은 루프에서 엔코더 기반 차체/바퀴 속도를 갱신합니다.
+ * - CAN FD+BRS telemetry 프레임으로 PC에 주행 데이터를 송신합니다.
   * @param  argument: Not used
   * @retval None
   */
@@ -232,93 +193,55 @@ void StartDefaultTask(void *argument)
   /* USER CODE BEGIN StartDefaultTask */
   (void) argument;
 
-#if UART3_SMOKE_TEST
-  if (!app_motor_smoke_init(app_robot_get_state(), &huart3)) {
+  robot_status_t *robot = app_robot_get_state();
+
+  if (!app_uart_smoke_init(robot, &huart3)) {
+      freertos_set_leds(false, false, true);
       Error_Handler();
   }
+
+  if (!can_telemetry_init()) {
+      freertos_set_leds(false, false, true);
+      Error_Handler();
+  }
+
+  freertos_set_leds(true, false, false); /* 초록: 통합 런타임 정상 기동 */
+
+  const uint32_t period_ms = app_uart_smoke_get_period_ms();
+  TickType_t last_wake_tick = xTaskGetTickCount();
 
   for (;;) {
-      app_motor_smoke_process(osKernelGetTickCount());
-      osDelay(app_motor_smoke_get_period_ms());
-  }
-#else
-  const uint32_t publish_period_ms = 25U; /* 목표 publish 주기(ms) */
-  const uint32_t tick_freq_hz = osKernelGetTickFreq(); /* RTOS tick frequency(Hz) */
-  TickType_t publish_period_ticks = pdMS_TO_TICKS(publish_period_ms); /* 목표 주기의 RTOS tick 표현 */
-  mros_executor_context_t mros_executor = {0}; /* micro-ROS node/executor 수명주기 컨텍스트 */
-  mros_publisher_context_t odom_publisher = {0}; /* odom_vel Twist 퍼블리셔 상태 */
-  robot_status_t *robot = app_robot_get_state(); /* 공유 로봇 상태 저장소 */
-  uint32_t publish_success_count = 0U; /* 사람 눈에 보이는 heartbeat 분주용 성공 카운터 */
-  UBaseType_t stack_high_water_mark = uxTaskGetStackHighWaterMark(NULL);
+      uint32_t now_ms = (uint32_t) osKernelGetTickCount();
+      TickType_t next_wake_tick = last_wake_tick + pdMS_TO_TICKS(period_ms);
+      int32_t wait_ticks = (int32_t) (next_wake_tick - now_ms);
+      app_uart_smoke_control_state_t uart_state = {0};
+      can_telemetry_drive_state_t drive_state = {0};
+      uint32_t flags;
 
-  g_default_task_stack_low_water_mark_words = stack_high_water_mark;
-
-  freertos_show_microros_waiting();
-
-  if (tick_freq_hz == 0U) {
-      freertos_show_microros_fault();
-      Error_Handler();
-  }
-
-  if (publish_period_ticks == 0U) {
-      publish_period_ticks = 1U;
-  }
-
-  if (!mros_executor_init(
-      &mros_executor,
-      &huart3,
-      MROS_EXECUTOR_DEFAULT_NODE_NAME)) {
-      freertos_show_microros_fault();
-      Error_Handler();
-  }
-
-  if (!mros_publisher_init_twist(
-      &odom_publisher,
-      &mros_executor,
-      MROS_PUBLISHER_DEFAULT_TWIST_TOPIC)) {
-      freertos_show_microros_fault();
-      Error_Handler();
-  }
-
-  app_robot_reset_measurements(robot);
-
-  TickType_t last_wake_tick = xTaskGetTickCount(); /* vTaskDelayUntil 기준 시각 */
-  TickType_t last_sample_tick = last_wake_tick;    /* dt 계산용 직전 샘플 시각 */
-
-  for (;;) {
-      /* Use an absolute wake time so the control/publish loop does not drift. */
-      vTaskDelayUntil(&last_wake_tick, publish_period_ticks);
-
-      TickType_t now_tick = xTaskGetTickCount();
-      TickType_t elapsed_ticks = now_tick - last_sample_tick;
-      float dt = (float) elapsed_ticks / (float) tick_freq_hz;
-      if (dt <= 0.0f) {
-          dt = (float) publish_period_ticks / (float) tick_freq_hz;
-      }
-      last_sample_tick = now_tick;
-
-      stack_high_water_mark = uxTaskGetStackHighWaterMark(NULL);
-      if (stack_high_water_mark < g_default_task_stack_low_water_mark_words) {
-          g_default_task_stack_low_water_mark_words = stack_high_water_mark;
+      if (wait_ticks < 0) {
+          wait_ticks = 0;
       }
 
-      /* Keep the task loop thin: sample robot state, then publish it. */
-      app_robot_update(robot, dt);
+      flags = osThreadFlagsWait(0x01, osFlagsWaitAny, wait_ticks);
 
-      if (!mros_publisher_publish_twist(
-              &odom_publisher,
-              robot->robot_linear_v,
-              robot->robot_angular_w)) {
-          freertos_show_microros_fault();
-          Error_Handler();
+      now_ms = (uint32_t) osKernelGetTickCount();
+      app_uart_smoke_process(now_ms);
+      app_uart_smoke_get_control_state(&uart_state);
+
+      drive_state.duty_percent = uart_state.duty_percent;
+      drive_state.left_duty_percent = uart_state.left_duty_percent;
+      drive_state.right_duty_percent = uart_state.right_duty_percent;
+      drive_state.curve_ratio_percent = uart_state.curve_ratio_percent;
+      drive_state.motion = uart_state.motion;
+      drive_state.is_motion_active = uart_state.is_motion_active;
+
+      can_telemetry_process(robot, &drive_state, now_ms);
+
+      if (flags == osFlagsErrorTimeout ||
+          (int32_t) (next_wake_tick - osKernelGetTickCount()) <= 0) {
+          last_wake_tick = next_wake_tick;
       }
-
-      ++publish_success_count;
-      freertos_show_microros_publish_ok(
-          (publish_success_count == 1U) ||
-          ((publish_success_count % MROS_PUBLISH_LED_DIVIDER) == 0U));
   }
-#endif
   /* USER CODE END StartDefaultTask */
 }
 
@@ -326,4 +249,3 @@ void StartDefaultTask(void *argument)
 /* USER CODE BEGIN Application */
 
 /* USER CODE END Application */
-

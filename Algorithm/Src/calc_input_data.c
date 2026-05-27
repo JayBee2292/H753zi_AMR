@@ -4,6 +4,12 @@
 
 #include "calc_input_data.h"
 
+#define ENCODER_MAX_WHEEL_SPEED_MPS 3.5f
+#define ENCODER_MAX_DELTA_MARGIN_TICKS 2048U
+#define ENCODER_VELOCITY_FILTER_INITIAL_P 1.0f
+#define ENCODER_VELOCITY_FILTER_Q 0.04f
+#define ENCODER_VELOCITY_FILTER_R 0.12f
+
 /**
  * @brief 차량 전진 기준으로 엔코더 부호를 맞춥니다.
  * @details
@@ -20,6 +26,86 @@ static int64_t wheel_apply_direction(const wheel_state_t *wheel, int64_t tick)
     }
 
     return tick;
+}
+
+static uint64_t encoder_timer_period(const TIM_HandleTypeDef *htim)
+{
+    if (htim == NULL) {
+        return 0U;
+    }
+
+    return (uint64_t) __HAL_TIM_GET_AUTORELOAD((TIM_HandleTypeDef *) htim) + 1ULL;
+}
+
+static int64_t encoder_counter_delta(const wheel_state_t *wheel, uint32_t current_counter)
+{
+    uint64_t period;
+    int64_t delta;
+    int64_t half_period;
+
+    if (wheel == NULL || wheel->htim == NULL) {
+        return 0;
+    }
+
+    period = encoder_timer_period(wheel->htim);
+    if (period <= 1ULL) {
+        return 0;
+    }
+
+    delta = (int64_t) current_counter - (int64_t) wheel->last_counter;
+    half_period = (int64_t) (period / 2ULL);
+
+    if (delta > half_period) {
+        delta -= (int64_t) period;
+    } else if (delta < -half_period) {
+        delta += (int64_t) period;
+    }
+
+    return delta;
+}
+
+static uint32_t encoder_max_delta_ticks(const wheel_state_t *wheel, float dt)
+{
+    double circumference_m;
+    double max_delta;
+    uint64_t period;
+    uint64_t max_correctable_delta;
+
+    if (wheel == NULL || wheel->ppr == 0U || wheel->diameter_m <= 0.0f || dt <= 0.0f) {
+        return 0U;
+    }
+
+    circumference_m = (double) PI * (double) wheel->diameter_m;
+    max_delta =
+        ((double) ENCODER_MAX_WHEEL_SPEED_MPS * (double) dt / circumference_m) *
+        (double) wheel->ppr;
+    max_delta += (double) ENCODER_MAX_DELTA_MARGIN_TICKS;
+
+    period = encoder_timer_period(wheel->htim);
+    if (period > 2ULL) {
+        max_correctable_delta = (period / 2ULL) - 1ULL;
+        if (max_delta > (double) max_correctable_delta) {
+            max_delta = (double) max_correctable_delta;
+        }
+    }
+
+    if (max_delta < 0.0) {
+        return 0U;
+    }
+
+    if (max_delta > (double) UINT32_MAX) {
+        return UINT32_MAX;
+    }
+
+    return (uint32_t) max_delta;
+}
+
+static bool encoder_delta_is_plausible(const wheel_state_t *wheel, int64_t delta_tick, float dt)
+{
+    int64_t abs_delta = (delta_tick < 0) ? -delta_tick : delta_tick;
+    uint32_t max_delta = encoder_max_delta_ticks(wheel, dt);
+
+    return abs_delta <= (int64_t) max_delta;
 }
 
 /**
@@ -39,75 +125,27 @@ static double wheel_ticks_to_distance_m(const wheel_state_t *wheel, int64_t tick
 
 /**
  * @brief 타이머 오버플로우/언더플로우 콜백
- * @details 
+ * @details
  * [알고리즘 설명]
- * - 모터 엔코더의 틱을 세는 타이머 카운터가 최댓값(AutoReload)을 넘어 0으로 가거나(Overflow), 
- *   0에서 최댓값으로 갈 때(Underflow) 인터럽트가 발생합니다.
- * - 이 함수는 인터럽트 발생 시 타이머가 카운팅하는 방향(DIR 비트)을 확인합니다.
- * - DIR 비트가 1이면 타이머가 감소 중이므로 Underflow 발생, 카운트를 감소시킵니다.
- * - DIR 비트가 0이면 타이머가 증가 중이므로 Overflow 발생, 카운트를 증가시킵니다.
- * - 이를 통해 16비트/32비트 하드웨어 타이머의 한계를 넘어 64비트의 누적 틱을 추적할 수 있습니다.
+ * - 현재 런타임은 update interrupt 누적 대신 주기 샘플링 delta를 64비트로 누적합니다.
+ * - CubeMX 인터럽트 핸들러 호환을 위해 심볼은 유지하지만 계산에는 사용하지 않습니다.
  */
 void encoder_overflow_callback(robot_status_t *robot, TIM_HandleTypeDef *htim) {
-    if (robot == NULL || htim == NULL) {
-        return;
-    }
-
-    // 4개의 바퀴 중 현재 인터럽트가 발생한 타이머를 찾습니다.
-    for (int i = 0; i < WHEEL_COUNT; i++) {
-        if (robot->wheels[i].htim == htim) {
-            // 방향 확인: DIR 비트가 1이면 DOWN 카운팅 (언더플로우), 0이면 UP 카운팅 (오버플로우)
-            if (__HAL_TIM_IS_TIM_COUNTING_DOWN(htim)) {
-                robot->wheels[i].overflow_cnt--;
-            } else {
-                robot->wheels[i].overflow_cnt++;
-            }
-            break;
-        }
-    }
+    (void) robot;
+    (void) htim;
 }
 
 /**
  * @brief 누적된 절대 엔코더 틱 수를 반환
  * @details
  * [알고리즘 설명]
- * - 인터럽트에서 누적한 오버플로우/언더플로우 횟수와 현재 하드웨어 타이머의 카운터 값을 합산하여
- *   64비트 크기의 절대 틱(Tick)을 계산합니다.
- * - Race Condition 방지: 이 함수가 실행되는 도중에 오버플로우/언더플로우가 발생하면 값이 왜곡될 수 있으므로,
- *   읽는 순간 글로벌 인터럽트를 비활성화(Critical Section)합니다.
- * - 엣지 케이스 보정: 인터럽트를 껐음에도 하드웨어 플래그(UPDATE FLAG)가 발생한 경우, 
- *   이미 타이머가 한 바퀴 돈 것이므로 방향에 맞춰 임시로 1을 보정해주어 정확한 누적 값을 유지합니다.
+ * - `wheel_update_velocity()`가 누적해 둔 64비트 tick을 반환합니다.
+ * - 하드웨어 CNT는 16비트/32비트 wrap-around 보정을 거쳐 주기마다 `total_tick`에 더해집니다.
  */
 int64_t get_total_encoder_tick(wheel_state_t *wheel) {
     if (wheel == NULL || wheel->htim == NULL) return 0;
-    
-    // 오버플로우 인터럽트와 메인 루프가 겹쳐서 값이 튀는 현상(Race Condition)을 방지하기 위해 
-    // 값을 읽는 찰나의 순간에만 글로벌 인터럽트를 비활성화합니다. (Critical Section)
-    uint32_t primask_bit = __get_PRIMASK(); // 현재 인터럽트 상태 저장
-    __disable_irq();                        // 인터럽트 발생 차단
 
-    uint32_t current_cnt = __HAL_TIM_GET_COUNTER(wheel->htim);
-    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(wheel->htim);
-    int32_t current_overflow = wheel->overflow_cnt;
-
-    // 만약 이 찰나의 순간에 이미 오버플로우가 하드웨어적으로 발생해버렸다면 (인터럽트는 막혀있지만 플래그는 뜸)
-    // 플래그를 확인하여 수동으로 한 번 보정해줍니다.
-    if (__HAL_TIM_GET_FLAG(wheel->htim, TIM_FLAG_UPDATE) != RESET) {
-        // 방향에 따라 오버플로우/언더플로우 보정
-        if (__HAL_TIM_IS_TIM_COUNTING_DOWN(wheel->htim)) {
-            current_overflow--;
-        } else {
-            current_overflow++;
-        }
-        // 카운터도 방금 넘어간 최신 값으로 다시 읽습니다.
-        current_cnt = __HAL_TIM_GET_COUNTER(wheel->htim);
-    }
-
-    __set_PRIMASK(primask_bit);             // 인터럽트 상태 원래대로 복구 (Critical Section 끝)
-
-    // 총 틱 수 계산
-    int64_t total_ticks = ((int64_t)current_overflow * ((int64_t)arr + 1LL)) + (int64_t) current_cnt;
-    return total_ticks;
+    return wheel->total_tick;
 }
 
 /**
@@ -118,42 +156,97 @@ int64_t get_total_encoder_tick(wheel_state_t *wheel) {
  *   이번 루프 동안 엔코더가 얼마나 회전했는지 계산합니다.
  * - 모터 장착 방향에 따라 좌/우측의 회전 방향 부호가 반대로 잡히는 경우(is_inverted_direction),
  *   이를 소프트웨어적으로 부호 반전하여 동일한 전진 방향(양수)으로 맞춰줍니다.
- * - delta_tick을 모터의 해상도(PPR)로 나누어 몇 바퀴를 회전했는지 비율을 구합니다.
+ * - delta_tick을 구동 바퀴 1회전당 count로 나누어 바퀴 회전량을 구합니다.
  * - 이 비율에 바퀴의 둘레(PI * 지름)를 곱해 선형 이동 거리(Distance, 미터 단위)를 산출합니다.
  * - 마지막으로, 계산된 거리를 호출 주기(dt)로 나누어 현재 바퀴의 선속도(m/s)를 도출합니다.
  * - 누적 이동 거리는 float 누산(`+=`) 대신 절대 틱을 매번 직접 환산하여 장시간 주행 시 정밀도 손실을 줄입니다.
  */
 void wheel_update_velocity(wheel_state_t *wheel, float dt) {
-    if (wheel == NULL) {
+    uint32_t current_counter;
+    int64_t raw_delta_tick;
+    int64_t signed_delta_tick;
+    int64_t current_tick;
+    int64_t delta_tick_abs;
+
+    if (wheel == NULL || wheel->htim == NULL) {
+        return;
+    }
+
+    current_counter = __HAL_TIM_GET_COUNTER(wheel->htim);
+    if (!wheel->has_counter_sample) {
+        wheel->last_counter = current_counter;
+        wheel->has_counter_sample = true;
+        wheel->raw_velocity_mps = 0.0f;
+        wheel->velocity_mps = 0.0f;
+        wheel->delta_tick_abs = 0U;
+        kalman_filter_reset(&wheel->velocity_filter, 0.0f);
         return;
     }
 
     if (dt <= 0.0f) {
+        wheel->raw_velocity_mps = 0.0f;
         wheel->velocity_mps = 0.0f;
+        wheel->delta_tick_abs = 0U;
+        kalman_filter_reset(&wheel->velocity_filter, 0.0f);
         return;
     }
 
-    // 오버플로우를 반영한 현재 64비트 절대 엔코더 틱 읽기
-    wheel->total_tick = get_total_encoder_tick(wheel);
-    // 현재값과 직전값 모두 동일한 부호 규칙으로 맞춘 뒤 delta를 계산합니다.
-    int64_t current_tick = wheel_apply_direction(wheel, wheel->total_tick);
-    int64_t prev_tick = wheel_apply_direction(wheel, wheel->prev_tick);
+    raw_delta_tick = encoder_counter_delta(wheel, current_counter);
 
-    // 델타 틱 계산 (이제 완전히 선형적으로 증가/감소하는 값을 사용하므로 오버플로우 걱정이 없음)
-    int64_t delta_tick = current_tick - prev_tick;
+    if (!encoder_delta_is_plausible(wheel, raw_delta_tick, dt)) {
+        wheel->last_counter = current_counter;
+        wheel->prev_tick = wheel->total_tick;
+        wheel->delta_tick_abs = 0U;
+        wheel->raw_velocity_mps = 0.0f;
+        wheel->velocity_mps = 0.0f;
+        wheel->is_fault = true;
+        kalman_filter_reset(&wheel->velocity_filter, 0.0f);
+        if (wheel->fault_count < UINT32_MAX) {
+            wheel->fault_count++;
+        }
+        return;
+    }
+
+    wheel->last_counter = current_counter;
+    wheel->prev_tick = wheel->total_tick;
+    wheel->total_tick += raw_delta_tick;
+    wheel->is_fault = false;
+
+    current_tick = wheel_apply_direction(wheel, wheel->total_tick);
+    signed_delta_tick = wheel_apply_direction(wheel, raw_delta_tick);
+    delta_tick_abs = (signed_delta_tick < 0) ? -signed_delta_tick : signed_delta_tick;
+
+    if (delta_tick_abs > (int64_t) UINT32_MAX) {
+        wheel->delta_tick_abs = UINT32_MAX;
+    } else {
+        wheel->delta_tick_abs = (uint32_t) delta_tick_abs;
+    }
 
     if (wheel->ppr > 0) {
-        double distance = wheel_ticks_to_distance_m(wheel, delta_tick);
+        double distance = wheel_ticks_to_distance_m(wheel, signed_delta_tick);
+        float measured_velocity_mps = (float) (distance / (double) dt);
 
-        wheel->velocity_mps = (float) (distance / (double) dt);
+        if (!wheel->velocity_filter.is_initialized) {
+            kalman_filter_init(
+                &wheel->velocity_filter,
+                measured_velocity_mps,
+                ENCODER_VELOCITY_FILTER_INITIAL_P,
+                ENCODER_VELOCITY_FILTER_Q,
+                ENCODER_VELOCITY_FILTER_R);
+        }
+
+        wheel->raw_velocity_mps = measured_velocity_mps;
+        wheel->velocity_mps = kalman_filter_update(
+            &wheel->velocity_filter,
+            measured_velocity_mps);
         // 절대 tick을 직접 환산해 누적 오차가 주기별 덧셈에 의해 커지는 것을 방지합니다.
         wheel->total_distance_m = wheel_ticks_to_distance_m(wheel, current_tick);
     } else {
+        wheel->raw_velocity_mps = 0.0f;
         wheel->velocity_mps = 0.0f;
         wheel->total_distance_m = 0.0;
+        kalman_filter_reset(&wheel->velocity_filter, 0.0f);
     }
-
-    wheel->prev_tick = wheel->total_tick;
 }
 
 /**
@@ -179,7 +272,7 @@ void calculate_robot_kinematics(robot_status_t *robot) {
     // 1: Front Right (FR)
     // 2: Rear Left (RL)
     // 3: Rear Right (RR)
-    
+
     float v_fl = robot->wheels[0].velocity_mps;
     float v_fr = robot->wheels[1].velocity_mps;
     float v_rl = robot->wheels[2].velocity_mps;
@@ -215,13 +308,13 @@ void debug_print_robot_state(const robot_status_t *robot, UART_HandleTypeDef *hu
     if (robot == NULL || huart == NULL) {
         return;
     }
-    
+
     char buf[128];
     // 선속도(V), 각속도(W), 그리고 1번 바퀴(Front Left)의 누적 이동 거리를 출력합니다.
     snprintf(buf, sizeof(buf), "V: %.3f m/s, W: %.3f rad/s, Dist(FL): %.3f m\r\n",
              robot->robot_linear_v,
              robot->robot_angular_w,
              robot->wheels[0].total_distance_m);
-             
+
     HAL_UART_Transmit(huart, (uint8_t*)buf, strlen(buf), 10);
 }

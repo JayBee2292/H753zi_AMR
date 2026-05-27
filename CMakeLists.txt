@@ -33,15 +33,25 @@ enable_language(C ASM)
 
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME}
-        Core/Inc/app_robot.h
-        Core/Inc/app_motor_smoke.h
-        Core/Inc/calc_input_data.h
-        Core/Inc/mros_executor.h
-        Core/Inc/mros_publisher.h
-        Core/Inc/mros_subscriber.h
-        Core/Src/app_motor_smoke.c
-        Core/Src/app_robot.c
-        Core/Src/calc_input_data.c)
+        App/Inc/app_robot.h
+        App/Inc/app_motor_drive.h
+        App/Inc/app_uart_smoke.h
+        Algorithm/Inc/calc_input_data.h
+        Algorithm/Inc/calc_output_data.h
+        Algorithm/Inc/kalman_filter.h
+        Algorithm/Inc/pid_controller.h
+        Mros/Inc/mros_executor.h
+        Mros/Inc/mros_publisher.h
+        Mros/Inc/mros_subscriber.h
+        App/Src/app_motor_drive.c
+        App/Src/app_uart_smoke.c
+        App/Src/app_robot.c
+        Algorithm/Src/calc_input_data.c
+        Algorithm/Src/calc_output_data.c
+        Algorithm/Src/kalman_filter.c
+        Algorithm/Src/pid_controller.c
+        App/Inc/can_telemetry.h
+        App/Src/can_telemetry.c)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
@@ -54,14 +64,17 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    Core/Src/mros_executor.c
-    Core/Src/mros_publisher.c
-    Core/Src/mros_subscriber.c
+    Mros/Src/mros_executor.c
+    Mros/Src/mros_publisher.c
+    Mros/Src/mros_subscriber.c
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    App/Inc
+    Algorithm/Inc
+    Mros/Inc
     Drivers/CMSIS/DSP/Include
     Drivers/CMSIS/DSP/PrivateInclude
     micro_ros_stm32cubemx_utils/microros_static_library_ide/libmicroros/include

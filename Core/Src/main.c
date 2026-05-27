@@ -125,7 +125,6 @@ int main(void)
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
-  MX_TIM5_Init();
   MX_USART3_UART_Init();
   MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
@@ -305,7 +304,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
   /* USER CODE BEGIN Callback 1 */
   // 엔코더 타이머 update interrupt를 소프트웨어 overflow 카운터에 반영해 64비트 절대 틱을 유지합니다.
   if (htim->Instance == TIM2 || htim->Instance == TIM3 || htim->Instance == TIM4 ||
-      htim->Instance == TIM5 || htim->Instance == TIM8) {
+      htim->Instance == TIM8) {
       app_robot_handle_encoder_overflow(htim);
   }
   /* USER CODE END Callback 1 */

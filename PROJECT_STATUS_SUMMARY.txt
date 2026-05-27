@@ -1,0 +1,293 @@
+H753 ROS2 SLAM project status summary
+Date: 2026-05-12
+
+1. Current architecture
+
+Xbox controller
+  -> Python UART script
+  -> STM32H753 drive control
+
+STM32H753 encoder/status telemetry
+  -> CAN FD
+  -> Makerbase CANable V2.0 Pro
+  -> ROS2 h753_can_odom node
+  -> /odom, /odom_vel, odom->base_link TF
+
+YDLIDAR Tmini Pro
+  -> ydlidar_ros2_driver
+  -> /scan
+
+
+2. Implemented items
+
+STM firmware
+- UART is used for Xbox remote drive commands.
+- CAN FD is used for telemetry transfer to the PC.
+- Encoder accumulated counts are handled as int64_t 64-bit values.
+- Encoder delta_abs is generated from abs(current_encoder - previous_encoder).
+- Implausible encoder jumps are detected on STM side.
+- Invalid encoder samples are not integrated into the accumulated count.
+- Encoder fault status is included in CAN telemetry.
+- CAN telemetry includes:
+  - 0x100 state frame
+  - 0x101 encoder frame
+
+Python control script
+- File:
+  /home/jongbeom/h753_ros_humble/tools/xbox_uart_can_telemetry.py
+- For current ROS2 operation, this script should be used for UART driving only.
+- Use --no-can so the Python script does not occupy the CANable device.
+
+ROS2 CAN odom package
+- Package:
+  /home/jongbeom/ros2_ws/src/h753_can_odom
+- Node:
+  h753_can_odom can_odom_node
+- Launch:
+  ros2 launch h753_can_odom can_odom.launch.py
+- Decodes CAN FD frames:
+  - 0x100 state telemetry
+  - 0x101 encoder telemetry
+- Publishes:
+  - /odom
+  - /odom_vel
+  - odom -> base_link TF
+- CANable port is fixed to the by-id path:
+  /dev/serial/by-id/usb-Openlight_Labs_CANable2_b158aa7_github.com_normaldotcom_canable2.git_209F33833630-if00
+- Launch log confirmed:
+  CANable open: /dev/serial/by-id/usb-Openlight_Labs_CANable2... S8/Y5
+  Encoder baseline received; odom integration starts on next frame
+
+YDLIDAR
+- Device:
+  YDLIDAR Tmini Pro
+- ROS2 driver:
+  /home/jongbeom/ros2_ws/src/ydlidar_ros2_driver
+- /scan output was confirmed at about 10 Hz.
+- A no-intensity parameter file was created:
+  /home/jongbeom/ros2_ws/src/ydlidar_ros2_driver/params/Tmini_no_intensity.yaml
+- Previous logs showed intermittent health warning:
+  health status bad
+  Lidar internal error[0x202]
+- /scan can still publish, but the lidar should be power-cycled or USB-reconnected if the error persists.
+
+Documentation
+- Existing future SLAM context file:
+  /home/jongbeom/h753_ros_humble/SLAM_CONTEXT_PROMPT.md
+
+
+3. Current device mapping
+
+CANable:
+  /dev/serial/by-id/usb-Openlight_Labs_CANable2_b158aa7_github.com_normaldotcom_canable2.git_209F33833630-if00
+  currently maps to /dev/ttyACM0
+
+STM UART / STLINK VCP:
+  /dev/serial/by-id/usb-STMicroelectronics_STLINK-V3_001F00223532511331333430-if02
+  currently maps to /dev/ttyACM1
+
+YDLIDAR:
+  /dev/serial/by-id/usb-Silicon_Labs_CP2102_USB_to_UART_Bridge_Controller_0001-if00-port0
+  currently maps to /dev/ttyUSB0
+
+
+4. Commands to run
+
+All ROS2 commands should be run inside distrobox cosmos-env.
+
+Common ROS2 setup:
+
+  distrobox enter cosmos-env
+  cd ~/ros2_ws
+  source /opt/ros/humble/setup.bash
+  source install/setup.bash
+
+Terminal 1: run lidar
+
+  ros2 launch ydlidar_ros2_driver ydlidar_launch.py \
+    params_file:=/home/jongbeom/ros2_ws/src/ydlidar_ros2_driver/params/Tmini_no_intensity.yaml
+
+Check lidar:
+
+  ros2 topic hz /scan
+
+Terminal 2: run CAN odom
+
+  ros2 launch h753_can_odom can_odom.launch.py
+
+Check CAN port:
+
+  ros2 param get /h753_can_odom can_port
+
+Expected value:
+
+  /dev/serial/by-id/usb-Openlight_Labs_CANable2_b158aa7_github.com_normaldotcom_canable2.git_209F33833630-if00
+
+Terminal 3: check odom topics
+
+  ros2 topic hz /odom
+  ros2 topic echo /odom --once
+  ros2 topic echo /odom_vel --once
+
+Terminal 4: run Xbox UART driving
+
+  cd ~/h753_ros_humble/tools
+  source .venv/bin/activate
+  python3 xbox_uart_can_telemetry.py --port /dev/ttyACM1 --no-can
+
+Important:
+- Do not let the Python script open CAN while ROS2 h753_can_odom is running.
+- Use --no-can for the Python driving script.
+- CANable is used by ROS2 h753_can_odom.
+- STM UART is used by the Python Xbox control script.
+
+
+5. What still needs to be done
+
+Odom validation
+- Drive the robot slowly and check:
+  ros2 topic hz /odom
+  ros2 topic echo /odom --once
+  ros2 topic echo /odom_vel --once
+- Confirm that forward driving produces positive /odom.twist.twist.linear.x.
+- If forward motion is negative, adjust wheel sign or encoder direction mapping.
+- Confirm left/right wheel mapping and track_width_m with real movement.
+
+Encoder fault validation
+- Watch h753_can_odom logs for:
+  Encoder sample rejected by STM
+  Encoder delta out of range
+- If these appear often, check encoder wiring, noise, STM threshold values, and ppr/wheel parameters.
+
+Lidar stability
+- Confirm /scan is stable at around 10 Hz.
+- If health status bad or 0x202 appears repeatedly, power-cycle or reconnect the lidar.
+
+SLAM integration
+- Required data before running SLAM:
+  /scan
+  /odom
+  /tf with odom -> base_link
+  /tf_static with base_link -> laser_frame
+- Next major step is running slam_toolbox with /scan and /odom.
+
+Bringup cleanup
+- Later, create or refine a single ROS2 launch file for:
+  ydlidar_ros2_driver
+  h753_can_odom
+  slam_toolbox
+- Keep Xbox UART driving as a separate Python process for now.
+
+
+6. Update on 2026-05-21
+
+Xbox control update
+- The Xbox driving script now uses split-stick control:
+  - Left stick Y: forward/backward throttle
+  - Right stick X: rotate in place when stopped, steer while moving
+  - Left stick X: ignored
+- The control pipeline is now:
+  joystick input
+  -> body velocity command v,w
+  -> UART CMD_TWIST packet
+  -> STM inverse kinematics
+  -> target left/right track speed
+  -> PID closed-loop PWM output
+- Main files:
+  /home/jongbeom/h753_ros_humble/tools/xbox_uart_can_telemetry.py
+  /home/jongbeom/h753_ros_humble/tools/xbox_drive_config.py
+  /home/jongbeom/h753_ros_humble/tools/xbox_drive_core.py
+  /home/jongbeom/h753_ros_humble/tools/run_xbox_uart_drive.sh
+  /home/jongbeom/h753_ros_humble/tools/DRIVE_TEST_README.txt
+
+Tracked-wheel model defaults
+- The robot is now treated as a tracked/skid-steer vehicle.
+- Default values in the Python drive scripts:
+  max_linear: 0.60 m/s
+  max_angular: 2.67 rad/s
+  track_gauge: 0.45 m
+  max_track_speed: 0.60 m/s
+  track_contact_length: 0.26 m
+  track_belt_width: 0.075 m
+- Full forward/backward stick now maps to duty 100 percent.
+- 0.60 m/s is still a command scale, not a measured real speed.
+- The real max speed must be calibrated by driving and measuring distance/time or encoder odom.
+
+UART command protocol
+- STM now supports the new twist command packet:
+  A5 5A 10 v_i16_le w_i16_le checksum
+- v_i16 is linear velocity in mm/s.
+- w_i16 is angular velocity in mrad/s.
+- The old motion/duty/ratio packet is still supported as fallback/debug input.
+- Python now sends CMD_TWIST by default, not motion/duty/ratio.
+
+PID / Kalman status
+- Kinematics is implemented and used:
+  Algorithm/Src/calc_input_data.c
+  app_robot_update() -> wheel_update_velocity() -> calculate_robot_kinematics()
+- Inverse kinematics is implemented and now used by STM runtime for CMD_TWIST:
+  Algorithm/Src/calc_output_data.c
+  calculate_inverse_kinematics()
+- PID controller has now been implemented and connected to the UART drive loop.
+- Kalman velocity filtering has now been implemented and connected to encoder velocity measurement.
+- New files:
+  Algorithm/Inc/pid_controller.h
+  Algorithm/Src/pid_controller.c
+  Algorithm/Inc/kalman_filter.h
+  Algorithm/Src/kalman_filter.c
+- Encoder velocity path:
+  raw encoder delta
+  -> raw_velocity_mps
+  -> Kalman filter
+  -> velocity_mps
+  -> calculate_robot_kinematics()
+- Motor command path is now feedforward plus PID correction:
+  Python UART CMD_TWIST packet
+  -> app_uart_smoke
+  -> calculate_inverse_kinematics()
+  -> target_left_velocity_mps/target_right_velocity_mps
+  -> encoder velocity feedback
+  -> PID correction
+  -> left_duty_percent/right_duty_percent
+  -> app_motor_drive_set_left_right_output()
+  -> PWM output
+- Current PID constants:
+  Kp=35.0
+  Ki=12.0
+  Kd=0.0
+  correction limit=+/-35 percent duty
+- Current Kalman constants:
+  initial P=1.0
+  Q=0.04
+  R=0.12
+
+Recommended next order
+- First test the latest PC-side control changes on the PC.
+- Confirm:
+  - forward/backward direction
+  - left/right rotation direction
+  - forward plus steering behavior
+  - full stick reaches duty 100
+  - CAN encoder telemetry and /odom direction signs
+- STM-side closed-loop velocity control is now present, but gains are not tuned yet.
+- Next test should be low-speed PC driving with --max-linear 0.30, --max-angular 0.60, --max-track-speed 0.30.
+- Watch the UART status line:
+  target(L,R)
+  fb(L,R)
+  pwm(L,R)
+  fault
+- If the robot oscillates, lower Kp/Ki.
+- If it is sluggish or cannot overcome static friction, increase Kp slightly or raise feedforward scale after confirming encoder sign.
+
+Latest PC drive-test bundle
+- Prepared bundle:
+  /tmp/h753_drive_test_bundle.tar.gz
+- It contains:
+  xbox_uart_can_telemetry.py
+  xbox_uart_teleop.py
+  drive_test_requirements.txt
+  run_xbox_uart_drive.sh
+  DRIVE_TEST_README.txt
+- SSH copy to 192.168.0.75 failed because authentication was denied.
+- Once SSH credentials are available, copy with:
+  scp /tmp/h753_drive_test_bundle.tar.gz USERNAME@192.168.0.75:/tmp/

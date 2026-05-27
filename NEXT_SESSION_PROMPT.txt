@@ -1,0 +1,94 @@
+Continue the STM32H753 tracked robot ROS2/SLAM project from this state.
+
+Current date of saved context: 2026-05-21
+Repo: /home/jongbeom/h753_ros_humble
+ROS2 workspace: /home/jongbeom/ros2_ws
+
+Architecture:
+- Xbox remote driving is over UART to STM32.
+- STM32 telemetry is sent over CAN FD to PC through Makerbase CANable V2.0 Pro.
+- ROS2 Humble runs in distrobox cosmos-env.
+- YDLIDAR Tmini Pro publishes /scan.
+- h753_can_odom publishes /odom, /odom_vel, and odom->base_link TF from CAN encoder telemetry.
+
+Latest Python driving update:
+- Main script:
+  /home/jongbeom/h753_ros_humble/tools/xbox_uart_can_telemetry.py
+- Helper:
+  /home/jongbeom/h753_ros_humble/tools/xbox_uart_teleop.py
+- Runner:
+  /home/jongbeom/h753_ros_humble/tools/run_xbox_uart_drive.sh
+- Config/functions:
+  /home/jongbeom/h753_ros_humble/tools/xbox_drive_config.py
+  /home/jongbeom/h753_ros_humble/tools/xbox_drive_core.py
+- Control is split-stick:
+  left stick Y -> forward/backward throttle
+  right stick X -> rotate in place when stopped, steer while moving
+  left stick X ignored
+- The script now converts joystick input to v,w and sends v,w directly to STM with CMD_TWIST.
+- STM uses calculate_inverse_kinematics() to calculate left/right target track speeds.
+- Old motion/duty/ratio UART packet still exists as fallback/debug.
+
+Tracked vehicle default parameters:
+- max_linear = 0.60 m/s
+- max_angular = 2.67 rad/s
+- track_gauge = 0.45 m
+- max_track_speed = 0.60 m/s
+- track_contact_length = 0.26 m
+- track_belt_width = 0.075 m
+- Full forward/backward stick maps to PWM duty 100 percent.
+- 0.60 m/s is a command scale, not a measured real speed.
+
+Run PC drive-only test:
+  cd /home/jongbeom/h753_ros_humble/tools
+  source venv/bin/activate
+  python3 xbox_uart_can_telemetry.py --port /dev/ttyACM1 --no-can --debug
+
+Safer slower test:
+  python3 xbox_uart_can_telemetry.py \
+    --port /dev/ttyACM1 \
+    --no-can \
+    --debug \
+    --max-linear 0.30 \
+    --max-angular 0.60 \
+    --max-track-speed 0.30
+
+Remote test PC:
+- hostname: jyl1015
+- IPv4: 192.168.0.75
+- Latest bundle:
+  /tmp/h753_drive_test_bundle.tar.gz
+- SSH reached the host but authentication failed for users jongbeom and jyl1015.
+
+Algorithm status:
+- Kinematics is implemented and used:
+  Algorithm/Src/calc_input_data.c
+  app_robot_update() -> wheel_update_velocity() -> calculate_robot_kinematics()
+- Inverse kinematics is connected to runtime control for CMD_TWIST:
+  Algorithm/Src/calc_output_data.c
+  calculate_inverse_kinematics()
+- PID is now implemented:
+  Algorithm/Inc/pid_controller.h
+  Algorithm/Src/pid_controller.c
+- Kalman velocity filtering is now implemented:
+  Algorithm/Inc/kalman_filter.h
+  Algorithm/Src/kalman_filter.c
+- Encoder velocity path:
+  raw_velocity_mps -> Kalman filter -> velocity_mps
+- UART drive loop now uses CMD_TWIST plus feedforward and PID correction:
+  v,w -> inverse kinematics -> target_left/right velocity -> encoder velocity feedback -> PID correction -> PWM.
+- Current PID constants in App/Src/app_uart_smoke.c:
+  Kp=35.0, Ki=12.0, Kd=0.0, correction limit=+/-35 percent duty.
+- Current Kalman constants in Algorithm/Src/calc_input_data.c:
+  P=1.0, Q=0.04, R=0.12.
+- Firmware build passed:
+  cmake --build build/Debug --target h753_ros_humble -j 4
+
+Recommended next steps:
+1. Test the latest Python driving changes on PC before moving to Jetson.
+2. Confirm forward/backward, rotate left/right, forward+steer, and duty 100 behavior.
+3. Confirm CAN telemetry and /odom signs.
+4. Test the new PID/Kalman loop at low speed first:
+   --max-linear 0.30 --max-angular 0.60 --max-track-speed 0.30
+5. Watch UART status target(L,R), fb(L,R), pwm(L,R), and fault.
+6. Tune PID after confirming encoder signs are correct.

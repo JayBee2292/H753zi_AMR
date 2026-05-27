@@ -1,8 +1,9 @@
 #include "app_motor_smoke.h"
 
+#include "app_motor_drive.h"
+
 #include "cmsis_os2.h"
 #include "main.h"
-#include "tim.h"
 #include "usart.h"
 
 #include <stdio.h>
@@ -13,7 +14,8 @@ enum {
     APP_MOTOR_SMOKE_PRINT_MS = 200U, /* UART 상태 출력 주기 */
 };
 
-/* Keep the all-wheel smoke test conservative to avoid tripping the power board. */
+/* 전원 보드가 차단(tripping)되는 것을 방지하기 위해 전체 바퀴 스모크 테스트 시의
+ * 모터 출력(duty)을 보수적으로 유지합니다. */
 static const int32_t APP_MOTOR_SMOKE_DUTY_PERCENT = 50;
 
 /**
@@ -84,27 +86,6 @@ static void app_motor_smoke_format_i64(int64_t value, char *buffer, size_t buffe
 }
 
 /**
- * @brief 모터 제어용 Duty 비례값(Compare Register Value) 산출
- * @details
- * [알고리즘 설명]
- * - 모터에 인가할 PWM Duty 퍼센트(-100% ~ 100%)를 입력받아 타이머의 Compare 값으로 매핑합니다.
- * - 음수의 경우 방향 전환에 쓰이므로 절댓값을 취합니다(100을 초과하면 100으로 제한).
- * - 타이머의 주기를 나타내는 AutoReload(ARR) 값을 읽어온 뒤, 
- *   (ARR * 절댓값 비율) / 100 공식을 통해 최종적으로 모터 드라이버에 전달할 PWM 폭을 계산합니다.
- */
-static uint32_t app_motor_smoke_percent_to_compare(int32_t duty_percent)
-{
-    uint32_t arr = __HAL_TIM_GET_AUTORELOAD(&htim1);
-    uint32_t magnitude = (duty_percent < 0) ? (uint32_t) (-duty_percent) : (uint32_t) duty_percent;
-
-    if (magnitude > 100U) {
-        magnitude = 100U;
-    }
-
-    return (arr * magnitude) / 100U;
-}
-
-/**
  * @brief 하드웨어 타이머 변화량(Raw Delta) 계산 및 Wrap-around 보정
  * @details
  * [알고리즘 설명]
@@ -113,7 +94,7 @@ static uint32_t app_motor_smoke_percent_to_compare(int32_t duty_percent)
  * - 이 때, 16비트/32비트 하드웨어 타이머 특성상 최댓값을 넘어 0으로 돌아가거나(Overflow),
  *   0에서 최댓값으로 언더플로우(Underflow)되는 "Wrap-around" 현상이 발생할 수 있습니다.
  * - 모터가 두 샘플링 사이클 사이에 카운터 표현 범위의 절반 이상 이동하지 않는다고 가정합니다.
- * - 만약 차이(delta)가 주기의 절반보다 크다면, 이는 정상적인 정회전이 아니라 역방향으로 
+ * - 만약 차이(delta)가 주기의 절반보다 크다면, 이는 정상적인 정회전이 아니라 역방향으로
  *   언더플로우된 것으로 간주하고 주기(Period)만큼 빼서 음수 델타로 보정합니다.
  * - 반대로 델타가 -(주기의 절반)보다 작다면, 오버플로우된 정회전으로 간주하여
  *   주기만큼 더해 양수 델타로 보정합니다.
@@ -146,46 +127,6 @@ static int32_t app_motor_smoke_compute_raw_delta(
     }
 
     return (int32_t) delta;
-}
-
-/**
- * @brief 모든 바퀴의 DIR 핀을 동일한 차량 진행 방향 기준으로 설정합니다.
- * @details
- * - 하드웨어 배선상 좌/우 바퀴 극성이 서로 반대이므로, 단순히 같은 레벨을 쓰지 않고
- *   실제 차량 전진/후진 기준으로 각 핀에 맞는 레벨을 기록합니다.
- * @param is_forward true면 차량 전진 방향, false면 차량 후진 방향
- */
-static void app_motor_smoke_apply_all_direction(bool is_forward)
-{
-    /* Measured rear pair polarity is mirrored by side, so apply the same left/right
-     * convention to the front pair during the all-wheel smoke test. */
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, is_forward ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_8, is_forward ? GPIO_PIN_RESET : GPIO_PIN_SET);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_10, is_forward ? GPIO_PIN_SET : GPIO_PIN_RESET);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_12, is_forward ? GPIO_PIN_RESET : GPIO_PIN_SET);
-}
-
-/**
- * @brief 모든 바퀴에 동일한 duty를 출력합니다.
- * @details
- * - 부호는 방향 핀으로, 크기는 PWM compare 값으로 분리해 적용합니다.
- * - duty가 0이면 방향은 유지하고 PWM 폭만 0으로 만들어 정지시킵니다.
- * @param duty_percent 차량 진행 기준 duty 비율(-100 ~ 100)
- */
-static void app_motor_smoke_apply_all_output(int32_t duty_percent)
-{
-    uint32_t compare = app_motor_smoke_percent_to_compare(duty_percent);
-
-    if (duty_percent > 0) {
-        app_motor_smoke_apply_all_direction(true);
-    } else if (duty_percent < 0) {
-        app_motor_smoke_apply_all_direction(false);
-    }
-
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, compare);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, compare);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, compare);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, compare);
 }
 
 /**
@@ -275,11 +216,9 @@ bool app_motor_smoke_init(robot_status_t *robot, UART_HandleTypeDef *debug_uart)
 
     app_robot_reset_measurements(robot);
 
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_2, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0U);
-    __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_4, 0U);
-    app_motor_smoke_apply_all_direction(true);
+    if (!app_motor_drive_init()) {
+        return false;
+    }
 
     /* raw CNT 변화량은 total_tick 기반 processed 데이터와 별도로 추적합니다. */
     g_app_motor_smoke.front_left_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[0].htim);
@@ -287,25 +226,9 @@ bool app_motor_smoke_init(robot_status_t *robot, UART_HandleTypeDef *debug_uart)
     g_app_motor_smoke.rear_left_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[2].htim);
     g_app_motor_smoke.rear_right_prev_cnt = __HAL_TIM_GET_COUNTER(robot->wheels[3].htim);
 
-    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1) != HAL_OK) {
-        return false;
-    }
-
-    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2) != HAL_OK) {
-        return false;
-    }
-
-    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3) != HAL_OK) {
-        return false;
-    }
-
-    if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
-        return false;
-    }
-
-    /* Run all four wheels in the same vehicle-forward direction so wiring,
-     * DIR polarity, and encoder sign can be checked together. */
-    app_motor_smoke_apply_all_output(APP_MOTOR_SMOKE_DUTY_PERCENT);
+    /* 배선, DIR 핀 극성, 그리고 엔코더 부호를 함께 점검할 수 있도록
+     * 네 바퀴 모두 차량 전진 방향으로 구동합니다. */
+    app_motor_drive_set_all_output(APP_MOTOR_SMOKE_DUTY_PERCENT);
 
     g_app_motor_smoke.last_update_ms = osKernelGetTickCount();
     g_app_motor_smoke.last_print_ms = g_app_motor_smoke.last_update_ms;
