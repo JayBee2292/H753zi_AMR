@@ -11,6 +11,7 @@ DEFAULT_MAX_LINEAR_MPS = 0.60
 DEFAULT_MAX_ANGULAR_RADPS = 2.67
 DEFAULT_TRACK_GAUGE_M = 0.45
 DEFAULT_MAX_TRACK_SPEED_MPS = 0.60
+DEFAULT_MOVING_INNER_RATIO = 0.40
 DEFAULT_TRACK_CONTACT_LENGTH_M = 0.26
 DEFAULT_TRACK_BELT_WIDTH_M = 0.075
 
@@ -52,5 +53,6 @@ class DriveConfig:
     max_angular_radps: float = DEFAULT_MAX_ANGULAR_RADPS
     track_gauge_m: float = DEFAULT_TRACK_GAUGE_M
     max_track_speed_mps: float = DEFAULT_MAX_TRACK_SPEED_MPS
+    moving_inner_ratio: float = DEFAULT_MOVING_INNER_RATIO
     track_contact_length_m: float = DEFAULT_TRACK_CONTACT_LENGTH_M
     track_belt_width_m: float = DEFAULT_TRACK_BELT_WIDTH_M

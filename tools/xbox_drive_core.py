@@ -8,6 +8,7 @@ from pathlib import Path
 
 from xbox_drive_config import (
     CANABLE_PORT_HINTS,
+    DEFAULT_MOVING_INNER_RATIO,
     DEFAULT_MAX_ANGULAR_RADPS,
     DEFAULT_MAX_LINEAR_MPS,
     DEFAULT_MAX_TRACK_SPEED_MPS,
@@ -210,6 +211,59 @@ def limit_twist_to_track_speed(
     return linear_mps, angular_radps, left_mps, right_mps
 
 
+def joystick_to_drive_targets(
+    throttle: float,
+    steer: float,
+    max_linear_mps: float = DEFAULT_MAX_LINEAR_MPS,
+    max_angular_radps: float = DEFAULT_MAX_ANGULAR_RADPS,
+    track_gauge_m: float = DEFAULT_TRACK_GAUGE_M,
+    max_track_speed_mps: float = DEFAULT_MAX_TRACK_SPEED_MPS,
+    moving_inner_ratio: float = DEFAULT_MOVING_INNER_RATIO,
+) -> tuple[float, float, float, float]:
+    throttle = clamp_float(throttle, -1.0, 1.0)
+    steer = clamp_float(steer, -1.0, 1.0)
+
+    if throttle == 0.0:
+        linear_mps, angular_radps = joystick_to_twist(
+            throttle,
+            steer,
+            max_linear_mps,
+            max_angular_radps,
+        )
+        return limit_twist_to_track_speed(
+            linear_mps,
+            angular_radps,
+            track_gauge_m,
+            max_track_speed_mps,
+        )
+
+    outer_mps = throttle * max_linear_mps
+    minimum_ratio = clamp_float(moving_inner_ratio, 0.0, 1.0)
+    inner_scale = 1.0 - ((1.0 - minimum_ratio) * abs(steer))
+    inner_mps = outer_mps * inner_scale
+
+    # While translating, steer by slowing the inner track without reversing it.
+    outer_is_left = (steer > 0.0) == (outer_mps > 0.0)
+    if outer_is_left:
+        left_mps, right_mps = outer_mps, inner_mps
+    else:
+        left_mps, right_mps = inner_mps, outer_mps
+
+    max_track_speed_mps = max(0.01, max_track_speed_mps)
+    peak_track_speed_mps = max(abs(left_mps), abs(right_mps))
+    if peak_track_speed_mps > max_track_speed_mps:
+        scale = max_track_speed_mps / peak_track_speed_mps
+        left_mps *= scale
+        right_mps *= scale
+
+    linear_mps = (left_mps + right_mps) / 2.0
+    if track_gauge_m > 0.0:
+        angular_radps = (right_mps - left_mps) / track_gauge_m
+    else:
+        angular_radps = 0.0
+    return linear_mps, angular_radps, left_mps, right_mps
+
+
 def track_speeds_to_uart_packet(
     left_mps: float,
     right_mps: float,
@@ -320,11 +374,15 @@ def encode_mixed_drive(
     max_angular_radps: float = DEFAULT_MAX_ANGULAR_RADPS,
     track_gauge_m: float = DEFAULT_TRACK_GAUGE_M,
     max_track_speed_mps: float = DEFAULT_MAX_TRACK_SPEED_MPS,
+    moving_inner_ratio: float = DEFAULT_MOVING_INNER_RATIO,
 ) -> tuple[int, int, int, float, float]:
-    linear_mps, angular_radps = joystick_to_twist(
+    _, _, left_mps, right_mps = joystick_to_drive_targets(
         throttle,
         steer,
         max_linear_mps,
         max_angular_radps,
+        track_gauge_m,
+        max_track_speed_mps,
+        moving_inner_ratio,
     )
-    return encode_twist_drive(linear_mps, angular_radps, track_gauge_m, max_track_speed_mps)
+    return track_speeds_to_uart_packet(left_mps, right_mps, max_track_speed_mps)

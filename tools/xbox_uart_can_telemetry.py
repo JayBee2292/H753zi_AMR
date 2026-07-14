@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import socket
 import struct
@@ -36,6 +37,7 @@ except ImportError as exc:
     ) from exc
 
 from xbox_drive_config import (  # noqa: E402
+    DEFAULT_MOVING_INNER_RATIO,
     DEFAULT_MAX_ANGULAR_RADPS,
     DEFAULT_MAX_LINEAR_MPS,
     DEFAULT_MAX_TRACK_SPEED_MPS,
@@ -55,8 +57,7 @@ from xbox_drive_core import (  # noqa: E402
     encode_stop_frame,
     encode_twist_frame,
     is_probably_canable_port,
-    joystick_to_twist,
-    limit_twist_to_track_speed,
+    joystick_to_drive_targets,
     resolve_stm_uart_port,
     serial_port_description,
     track_speeds_to_uart_packet,
@@ -85,6 +86,9 @@ FD_DLC_TO_LENGTH = {
     "F": 64,
 }
 FD_LENGTH_TO_DLC = {value: key for key, value in FD_DLC_TO_LENGTH.items()}
+ENCODER_CONSOLE_PATTERN = re.compile(
+    r"enc\(FL,FR,RL,RR\)=(?P<ticks>[^\s]+)\s+delta=(?P<delta>[^\s]+)"
+)
 
 
 def install_shutdown_handlers() -> None:
@@ -94,6 +98,24 @@ def install_shutdown_handlers() -> None:
     signal.signal(signal.SIGINT, shutdown_handler)
     signal.signal(signal.SIGTERM, shutdown_handler)
     signal.signal(signal.SIGHUP, shutdown_handler)
+
+
+def consume_encoder_console_lines(pending: str, data: str) -> tuple[str, list[str]]:
+    pending += data.replace("\r", "\n")
+    lines = pending.split("\n")
+    pending = lines.pop()
+    summaries: list[str] = []
+
+    for line in lines:
+        match = ENCODER_CONSOLE_PATTERN.search(line)
+        if match is None:
+            continue
+        summaries.append(
+            "enc(FL,FR,RL,RR)="
+            f"{match.group('ticks')} delta={match.group('delta')}"
+        )
+
+    return pending, summaries
 
 
 @dataclass
@@ -505,15 +527,21 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--joy-idx", type=int, default=-1, help="Force joystick index")
     parser.add_argument("--debug", action="store_true", help="Print local controller mapping")
     parser.add_argument(
+        "--encoder-only",
+        action="store_true",
+        help="Print only STM encoder cumulative ticks and deltas; keep the full session log.",
+    )
+    parser.add_argument(
         "--log-file",
         default=default_drive_log_path(),
         help="Session log output path. The file is overwritten for each run.",
     )
     parser.add_argument("--print-period", type=float, default=0.10, help="Telemetry print period in seconds")
     parser.add_argument("--max-linear", type=float, default=DEFAULT_MAX_LINEAR_MPS, help="Maximum linear speed command in m/s")
-    parser.add_argument("--max-angular", type=float, default=DEFAULT_MAX_ANGULAR_RADPS, help="Maximum angular speed command in rad/s")
+    parser.add_argument("--max-angular", type=float, default=DEFAULT_MAX_ANGULAR_RADPS, help="Maximum rotate-in-place angular speed command in rad/s")
     parser.add_argument("--track-gauge", type=float, default=DEFAULT_TRACK_GAUGE_M, help="Effective distance between left/right track centers in meters")
     parser.add_argument("--max-track-speed", type=float, default=DEFAULT_MAX_TRACK_SPEED_MPS, help="Track speed that maps to 100 percent duty")
+    parser.add_argument("--moving-inner-ratio", type=float, default=DEFAULT_MOVING_INNER_RATIO, help="Minimum inside/outside track speed ratio while translating and steering")
     parser.add_argument("--track-contact-length", type=float, default=DEFAULT_TRACK_CONTACT_LENGTH_M, help="Track ground contact length in meters")
     parser.add_argument("--track-belt-width", type=float, default=DEFAULT_TRACK_BELT_WIDTH_M, help="Track belt width in meters")
     return parser.parse_args()
@@ -574,13 +602,15 @@ def main() -> int:
     )
     print(
         f"Speed limits: linear={args.max_linear:.2f}m/s, "
-        f"angular={args.max_angular:.2f}rad/s, "
-        f"track={args.max_track_speed:.2f}m/s"
+        f"spin_angular={args.max_angular:.2f}rad/s, "
+        f"track={args.max_track_speed:.2f}m/s, "
+        f"moving_inner_ratio={args.moving_inner_ratio:.2f}"
     )
     session_log.write(
         "INFO",
         f"uart={serial_port_description(control_port)} baud={args.baud} protocol={args.protocol} "
-        f"limits linear={args.max_linear:.2f} angular={args.max_angular:.2f} track={args.max_track_speed:.2f}",
+        f"limits linear={args.max_linear:.2f} spin_angular={args.max_angular:.2f} "
+        f"track={args.max_track_speed:.2f} moving_inner_ratio={args.moving_inner_ratio:.2f}",
     )
     print("Press Ctrl+C to stop.")
 
@@ -590,6 +620,7 @@ def main() -> int:
     last_tx_frame = b""
     latest_telemetry: Telemetry | None = None
     latest_encoder: EncoderTelemetry | None = None
+    encoder_console_pending = ""
 
     try:
         while True:
@@ -604,17 +635,14 @@ def main() -> int:
 
             throttle = -ly
             steer = rx
-            linear_mps, angular_radps = joystick_to_twist(
+            linear_mps, angular_radps, left_mps, right_mps = joystick_to_drive_targets(
                 throttle,
                 steer,
                 args.max_linear,
                 args.max_angular,
-            )
-            linear_mps, angular_radps, left_mps, right_mps = limit_twist_to_track_speed(
-                linear_mps,
-                angular_radps,
                 args.track_gauge,
                 args.max_track_speed,
+                args.moving_inner_ratio,
             )
             motion_code, duty, curve_ratio, left_mix, right_mix = track_speeds_to_uart_packet(
                 left_mps,
@@ -658,8 +686,16 @@ def main() -> int:
                 if available:
                     data = serial_port.read(available).decode("utf-8", errors="replace")
                     session_log.feed_serial(data)
-                    sys.stdout.write(data)
-                    sys.stdout.flush()
+                    if args.encoder_only:
+                        encoder_console_pending, summaries = consume_encoder_console_lines(
+                            encoder_console_pending,
+                            data,
+                        )
+                        for summary in summaries:
+                            print(summary)
+                    else:
+                        sys.stdout.write(data)
+                        sys.stdout.flush()
                 last_serial_poll_time = now
 
             if can_reader is not None:

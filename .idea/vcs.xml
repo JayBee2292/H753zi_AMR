@@ -4,4 +4,7 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/micro_ros_stm32cubemx_utils" vcs="Git" />
   </component>
+  <component name="VcsProjectSettings">
+    <option name="detectVcsMappingsAutomatically" value="false" />
+  </component>
 </project>

@@ -31,6 +31,7 @@ except ImportError as exc:
     ) from exc
 
 from xbox_drive_config import (
+    DEFAULT_MOVING_INNER_RATIO,
     DEFAULT_MAX_ANGULAR_RADPS,
     DEFAULT_MAX_LINEAR_MPS,
     DEFAULT_MAX_TRACK_SPEED_MPS,
@@ -50,8 +51,7 @@ from xbox_drive_core import (
     encode_stop_frame,
     encode_twist_frame,
     is_probably_canable_port,
-    joystick_to_twist,
-    limit_twist_to_track_speed,
+    joystick_to_drive_targets,
     resolve_stm_uart_port,
     serial_port_description,
     track_speeds_to_uart_packet,
@@ -80,6 +80,7 @@ class XboxUartTeleop:
         max_angular_radps: float = DEFAULT_MAX_ANGULAR_RADPS,
         track_gauge_m: float = DEFAULT_TRACK_GAUGE_M,
         max_track_speed_mps: float = DEFAULT_MAX_TRACK_SPEED_MPS,
+        moving_inner_ratio: float = DEFAULT_MOVING_INNER_RATIO,
         track_contact_length_m: float = DEFAULT_TRACK_CONTACT_LENGTH_M,
         track_belt_width_m: float = DEFAULT_TRACK_BELT_WIDTH_M,
         log_file: str = default_drive_log_path(),
@@ -91,6 +92,7 @@ class XboxUartTeleop:
         self.max_angular_radps = max_angular_radps
         self.track_gauge_m = track_gauge_m
         self.max_track_speed_mps = max_track_speed_mps
+        self.moving_inner_ratio = moving_inner_ratio
         self.track_contact_length_m = track_contact_length_m
         self.track_belt_width_m = track_belt_width_m
         self.control_lock: DriveControlLock | None = None
@@ -164,7 +166,8 @@ class XboxUartTeleop:
             "INFO",
             f"uart={serial_port_description(self.port)} baud={self.baud} protocol={self.protocol} "
             f"dry_run={self.dry_run} limits linear={self.max_linear_mps:.2f} "
-            f"angular={self.max_angular_radps:.2f} track={self.max_track_speed_mps:.2f}",
+            f"spin_angular={self.max_angular_radps:.2f} track={self.max_track_speed_mps:.2f} "
+            f"moving_inner_ratio={self.moving_inner_ratio:.2f}",
         )
 
         self.last_tx_time = time.monotonic()
@@ -196,8 +199,9 @@ class XboxUartTeleop:
         )
         print(
             f"Speed limits: linear={self.max_linear_mps:.2f}m/s, "
-            f"angular={self.max_angular_radps:.2f}rad/s, "
-            f"track={self.max_track_speed_mps:.2f}m/s"
+            f"spin_angular={self.max_angular_radps:.2f}rad/s, "
+            f"track={self.max_track_speed_mps:.2f}m/s, "
+            f"moving_inner_ratio={self.moving_inner_ratio:.2f}"
         )
         print("Press Ctrl+C to quit.")
 
@@ -220,17 +224,14 @@ class XboxUartTeleop:
 
                 throttle = -ly
                 steer = rx
-                linear_mps, angular_radps = joystick_to_twist(
+                linear_mps, angular_radps, left_mps, right_mps = joystick_to_drive_targets(
                     throttle,
                     steer,
                     self.max_linear_mps,
                     self.max_angular_radps,
-                )
-                linear_mps, angular_radps, left_mps, right_mps = limit_twist_to_track_speed(
-                    linear_mps,
-                    angular_radps,
                     self.track_gauge_m,
                     self.max_track_speed_mps,
+                    self.moving_inner_ratio,
                 )
                 motion_code, duty, curve_ratio, left_mix, right_mix = track_speeds_to_uart_packet(
                     left_mps,
@@ -310,9 +311,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--joy-idx", type=int, default=-1, help="Force specific joystick index instead of auto-detecting")
     parser.add_argument("--max-linear", type=float, default=DEFAULT_MAX_LINEAR_MPS, help="Maximum linear speed command in m/s")
-    parser.add_argument("--max-angular", type=float, default=DEFAULT_MAX_ANGULAR_RADPS, help="Maximum angular speed command in rad/s")
+    parser.add_argument("--max-angular", type=float, default=DEFAULT_MAX_ANGULAR_RADPS, help="Maximum rotate-in-place angular speed command in rad/s")
     parser.add_argument("--track-gauge", type=float, default=DEFAULT_TRACK_GAUGE_M, help="Effective distance between left/right track centers in meters")
     parser.add_argument("--max-track-speed", type=float, default=DEFAULT_MAX_TRACK_SPEED_MPS, help="Track speed that maps to 100 percent duty")
+    parser.add_argument("--moving-inner-ratio", type=float, default=DEFAULT_MOVING_INNER_RATIO, help="Minimum inside/outside track speed ratio while translating and steering")
     parser.add_argument("--track-contact-length", type=float, default=DEFAULT_TRACK_CONTACT_LENGTH_M, help="Track ground contact length in meters")
     parser.add_argument("--track-belt-width", type=float, default=DEFAULT_TRACK_BELT_WIDTH_M, help="Track belt width in meters")
     parser.add_argument(
@@ -337,6 +339,7 @@ def main() -> int:
         max_angular_radps=args.max_angular,
         track_gauge_m=args.track_gauge,
         max_track_speed_mps=args.max_track_speed,
+        moving_inner_ratio=args.moving_inner_ratio,
         track_contact_length_m=args.track_contact_length,
         track_belt_width_m=args.track_belt_width,
         log_file=args.log_file,

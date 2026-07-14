@@ -1,6 +1,7 @@
 #include "app_uart_smoke.h"
 
 #include "app_motor_drive.h"
+#include "can_telemetry.h"
 #include "calc_output_data.h"
 #include "cmsis_os2.h"
 #include "pid_controller.h"
@@ -83,6 +84,8 @@ typedef struct {
     pid_controller_t left_pid;
     pid_controller_t right_pid;
     uint32_t last_motion_command_ms;
+    uint32_t last_printed_can_bus_off_count;
+    uint32_t last_printed_can_error_event_count;
     app_uart_smoke_motion_t motion;
     bool is_initialized;
 } app_uart_smoke_state_t;
@@ -676,6 +679,7 @@ static void app_uart_smoke_print_help(void)
 static void app_uart_smoke_print_status(void)
 {
     const robot_status_t *robot = g_app_uart_smoke.robot;
+    can_telemetry_diagnostics_t can_diagnostics = {0};
     char fl_tick[24];
     char fr_tick[24];
     char rl_tick[24];
@@ -749,6 +753,49 @@ static void app_uart_smoke_print_status(void)
         g_app_uart_smoke.print_delta_tick_abs,
         0,
         sizeof(g_app_uart_smoke.print_delta_tick_abs));
+
+    can_telemetry_get_diagnostics(&can_diagnostics);
+    if (can_diagnostics.bus_off_count ==
+            g_app_uart_smoke.last_printed_can_bus_off_count &&
+        can_diagnostics.error_event_count ==
+            g_app_uart_smoke.last_printed_can_error_event_count) {
+        return;
+    }
+
+    g_app_uart_smoke.last_printed_can_bus_off_count =
+        can_diagnostics.bus_off_count;
+    g_app_uart_smoke.last_printed_can_error_event_count =
+        can_diagnostics.error_event_count;
+    length = snprintf(
+        g_app_uart_smoke_tx_buffer,
+        sizeof(g_app_uart_smoke_tx_buffer),
+        "CANDBG busoff=%lu events=%lu its=0x%08lX lec=%u dlec=%u tec=%u rec=%u cel=%u ep=%u ew=%u pxe=%u tdc=%u\r\n",
+        (unsigned long) can_diagnostics.bus_off_count,
+        (unsigned long) can_diagnostics.error_event_count,
+        (unsigned long) can_diagnostics.last_error_status_its,
+        (unsigned int) can_diagnostics.last_error_code,
+        (unsigned int) can_diagnostics.data_last_error_code,
+        (unsigned int) can_diagnostics.tx_error_count,
+        (unsigned int) can_diagnostics.rx_error_count,
+        (unsigned int) can_diagnostics.error_logging_count,
+        (unsigned int) can_diagnostics.error_passive,
+        (unsigned int) can_diagnostics.error_warning,
+        (unsigned int) can_diagnostics.protocol_exception,
+        (unsigned int) can_diagnostics.tdc_value);
+
+    if (length <= 0) {
+        return;
+    }
+
+    if ((size_t) length >= sizeof(g_app_uart_smoke_tx_buffer)) {
+        length = (int) sizeof(g_app_uart_smoke_tx_buffer) - 1;
+    }
+
+    (void) HAL_UART_Transmit(
+        g_app_uart_smoke.uart,
+        (uint8_t *) g_app_uart_smoke_tx_buffer,
+        (uint16_t) length,
+        20U);
 }
 
 static void app_uart_smoke_update_closed_loop(robot_status_t *robot, float dt)

@@ -27,6 +27,8 @@ FD_DLC_TO_LENGTH = {
     "F": 64,
 }
 
+CAN_TELEMETRY_COMMAND_ID = 0x1FF
+
 
 @dataclass
 class SlcanFrame:
@@ -95,6 +97,14 @@ def send_command(port: serial.Serial, command: str) -> None:
     port.flush()
 
 
+def send_telemetry_enable(port: serial.Serial, enabled: bool) -> None:
+    payload = bytes([1, 1 if enabled else 0]).ljust(8, b"\x00")
+    send_command(
+        port,
+        f"d{CAN_TELEMETRY_COMMAND_ID:03X}8{payload.hex().upper()}",
+    )
+
+
 def drain(port: serial.Serial, duration_s: float = 0.1) -> None:
     deadline = time.monotonic() + duration_s
     while time.monotonic() < deadline:
@@ -142,6 +152,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-retransmit", action="store_true", default=True)
     parser.add_argument("--duration", type=float, default=0.0, help="seconds to run; 0 means forever")
     parser.add_argument("--raw", action="store_true", help="print raw non-frame lines")
+    parser.add_argument(
+        "--enable-telemetry",
+        action="store_true",
+        help="enable STM32 telemetry on 0x1FF and refresh it once per second",
+    )
     return parser.parse_args()
 
 
@@ -163,10 +178,19 @@ def main() -> int:
             f"mode={'silent' if args.silent else 'normal'}"
         )
 
+        next_enable_refresh = time.monotonic()
+        if args.enable_telemetry:
+            send_telemetry_enable(port, True)
+
         deadline = time.monotonic() + args.duration if args.duration > 0 else None
         buffer = bytearray()
 
         while not stop:
+            now = time.monotonic()
+            if args.enable_telemetry and now >= next_enable_refresh:
+                send_telemetry_enable(port, True)
+                next_enable_refresh = now + 1.0
+
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
@@ -190,6 +214,10 @@ def main() -> int:
                     print_frame(frame)
                 elif args.raw:
                     print(line)
+
+        if args.enable_telemetry:
+            send_telemetry_enable(port, False)
+            time.sleep(0.02)
 
         send_command(port, "E")
         time.sleep(0.1)

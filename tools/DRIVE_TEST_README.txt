@@ -2,7 +2,6 @@ H753 STM32 Xbox UART drive test
 
 Files in this bundle:
 - xbox_uart_can_telemetry.py
-- xbox_uart_teleop.py
 - xbox_drive_config.py
 - xbox_drive_core.py
 - drive_test_requirements.txt
@@ -14,7 +13,10 @@ Purpose:
 - Left stick Y controls forward/backward throttle.
 - Right stick X controls rotate-in-place when stopped.
 - Left stick Y and right stick X can be used at the same time.
-- Stick input is converted to body velocity v,w first.
+- While moving and steering, the inside track keeps moving in the travel direction.
+- MOVING_INNER_RATIO sets the minimum inside/outside speed ratio at full steering.
+- While stopped, right stick X still commands opposite tracks for rotate-in-place.
+- The selected track speeds are converted to body velocity v,w for transmission.
 - v,w is sent directly to STM with the UART CMD_TWIST packet.
 - STM runs differential/skid-steer inverse kinematics.
 - PID speed control is implemented, but the currently tested firmware build is
@@ -33,6 +35,9 @@ Every run overwrites a clean combined TX/STM session log at:
   tools/logs/xbox_drive_latest.log
 
 This log is flushed during driving so it can be inspected while the test is running.
+The default wrapper keeps the terminal concise: it prints only STM encoder
+cumulative ticks and deltas. Full TX commands and STM lines remain in the log.
+Pass --debug only when local Xbox axis and UART command details are needed.
 Only one UART drive process may run at a time. A second invocation exits instead
 of sending conflicting motor commands. Ctrl+C, SIGTERM, or terminal hangup sends
 a stop frame and closes the session cleanly.
@@ -65,6 +70,7 @@ Override speed/geometry defaults:
   MAX_ANGULAR=2.67 \
   TRACK_GAUGE=0.45 \
   MAX_TRACK_SPEED=0.40 \
+  MOVING_INNER_RATIO=0.40 \
   TRACK_CONTACT_LENGTH=0.26 \
   TRACK_BELT_WIDTH=0.075 \
   ./run_xbox_uart_drive.sh /dev/ttyACM1
@@ -87,6 +93,7 @@ Manual run:
     --max-angular 2.67 \
     --track-gauge 0.45 \
     --max-track-speed 0.60 \
+    --moving-inner-ratio 0.40 \
     --track-contact-length 0.26 \
     --track-belt-width 0.075
 
