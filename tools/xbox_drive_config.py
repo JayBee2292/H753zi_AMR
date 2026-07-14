@@ -16,7 +16,15 @@ DEFAULT_TRACK_CONTACT_LENGTH_M = 0.26
 DEFAULT_TRACK_BELT_WIDTH_M = 0.075
 
 STM_UART_PORT_HINTS = ("STMicroelectronics", "STLINK")
-CANABLE_PORT_HINTS = ("CANable", "CANable2", "Openlight", "normaldotcom")
+CANABLE_PORT_HINTS = (
+    "CANable",
+    "CANable2",
+    "Openlight",
+    "normaldotcom",
+    "ElmueSoft",
+    "netcult",
+    "Slcan_2.5",
+)
 FALLBACK_STM_UART_PORTS = ("/dev/ttyACM1", "/dev/ttyUSB0", "/dev/ttyACM0")
 
 FRAME_HEADER_0 = 0xA5
